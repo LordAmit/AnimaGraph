@@ -1,0 +1,14 @@
+# Build output (rebuilt by cargo; can grow to many gigabytes)
+/target/
+
+# Packaged app and zips made by make-mac-app.sh (publish zips as releases instead)
+/dist/
+
+# Test screenshots and sample files written while developing
+/shots/
+
+# macOS and editor files
+.DS_Store
+*.swp
+.idea/
+.vscode/

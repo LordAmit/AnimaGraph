@@ -16,8 +16,7 @@ Everything runs on your own computer. Nothing is uploaded.
 ## Use the ready-made app (macOS)
 
 1. Download `Animagraph-<version>-macos-<cpu>.zip` from the
-   repository's **Releases** page. Use `arm64` for Apple silicon Macs
-   (M1 and later) and `x86_64` for Intel Macs.
+   repository's **Releases** page. Use `arm64` for Apple silicon Macs.
 2. Double-click the zip, then drag **Animagraph.app** into
    **Applications**.
 3. The first time, macOS may block it because the app is not notarized by

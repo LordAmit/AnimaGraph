@@ -15,6 +15,7 @@ pub enum Format {
     /// A single still picture.
     Png,
     Jpeg,
+    Heif,
 }
 
 impl Format {
@@ -26,6 +27,7 @@ impl Format {
             Format::Mov => "MOV video",
             Format::Png => "PNG image (still)",
             Format::Jpeg => "JPEG image (still)",
+            Format::Heif => "HEIC / HEIF image (still)",
         }
     }
     pub fn extension(self) -> Option<&'static str> {
@@ -36,11 +38,12 @@ impl Format {
             Format::Mov => Some("mov"),
             Format::Png => Some("png"),
             Format::Jpeg => Some("jpg"),
+            Format::Heif => Some("heic"),
         }
     }
 
     pub fn is_still(self) -> bool {
-        matches!(self, Format::Png | Format::Jpeg)
+        matches!(self, Format::Png | Format::Jpeg | Format::Heif)
     }
 
     pub fn is_video(self) -> bool {
@@ -63,7 +66,7 @@ pub fn save(format: Format, frames: &[RgbaImage], fps: u32, target: &Path, repea
     match format {
         Format::Gif => save_gif(frames, fps, target),
         Format::PngFrames => save_pngs(frames, target),
-        Format::Png | Format::Jpeg => match frames.first() {
+        Format::Png | Format::Jpeg | Format::Heif => match frames.first() {
             Some(f) => save_still(format, f, target),
             None => Err("Nothing to save.".into()),
         },
@@ -88,9 +91,37 @@ pub fn save_still(format: Format, img: &RgbaImage, target: &Path) -> Result<Path
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92);
             enc.encode_image(&rgb).map_err(|e| e.to_string())?;
         }
+        Format::Heif => save_heif(img, target)?,
         _ => img.save_with_format(target, image::ImageFormat::Png).map_err(|e| e.to_string())?,
     }
     Ok(target.to_path_buf())
+}
+
+/// HEIF (.heic) through the encoder built into macOS.
+fn save_heif(img: &RgbaImage, target: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let tmp = std::env::temp_dir().join(format!("animagraph_heif_{}.png", std::process::id()));
+        img.save_with_format(&tmp, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        let out = Command::new("/usr/bin/sips")
+            .args(["-s", "format", "heic", "-s", "formatOptions", "90"])
+            .arg(&tmp)
+            .arg("--out")
+            .arg(target)
+            .output()
+            .map_err(|e| format!("Could not start the HEIF encoder: {e}"))?;
+        let _ = std::fs::remove_file(&tmp);
+        if out.status.success() && target.exists() {
+            Ok(())
+        } else {
+            Err("macOS could not save the HEIF file.".into())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (img, target);
+        Err("HEIF export works on macOS only. Choose PNG or JPEG.".into())
+    }
 }
 
 fn save_gif(frames: &[RgbaImage], fps: u32, target: &Path) -> Result<PathBuf, String> {
@@ -171,6 +202,15 @@ mod tests {
             let p = super::save_still(f, &img, &dir.join(name)).unwrap();
             let back = image::open(&p).unwrap();
             assert_eq!((back.width(), back.height()), (40, 30));
+        }
+        // HEIF: written by macOS, read back through the same system converter.
+        #[cfg(target_os = "macos")]
+        {
+            let p = super::save_still(super::Format::Heif, &img, &dir.join("a.heic")).unwrap();
+            let back = crate::raw::decode(&p).unwrap();
+            assert_eq!(back.dimensions(), (40, 30));
+            let px = back.get_pixel(5, 5);
+            assert!((px[0] as i32 - 200).abs() < 15, "{px:?}");
         }
         let _ = std::fs::remove_dir_all(dir);
     }

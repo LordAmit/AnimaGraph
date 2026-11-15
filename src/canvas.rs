@@ -102,7 +102,9 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
         painter.rect_filled(out_rect, CornerRadius::ZERO, Color32::from_rgb(r, g, b));
     }
     let uv = Rect::from_min_size(Pos2::new(view_region.x, view_region.y), Vec2::new(view_region.w, view_region.h));
+    // While a preset is hovered, show the still with that preset instead of the loop.
     let preview_tex = match (app.view, app.active_clip) {
+        _ if app.look_preview.is_some() => None,
         (View::Preview, Some(i)) => app.clips.get(i).map(|clip| {
             let n = clip.textures.len().max(1);
             let idx = (app.play_pos as usize).min(n - 1);
@@ -183,6 +185,12 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
             painter.rect_filled(r, CornerRadius::same(5), Color32::from_black_alpha(160));
             painter.galley(r.min + Vec2::new(7.0, 3.0), g, Color32::WHITE);
         }
+    }
+    if let Some((_, name)) = &app.look_preview {
+        let g = painter.layout_no_wrap(format!("PREVIEW · {name}"), FontId::proportional(11.0), Color32::WHITE);
+        let r = Align2::LEFT_TOP.anchor_size(img_rect.left_top() + Vec2::new(10.0, 10.0), g.size()).expand2(Vec2::new(7.0, 3.0));
+        painter.rect_filled(r, CornerRadius::same(5), theme::ACCENT.gamma_multiply(0.85));
+        painter.galley(r.min + Vec2::new(7.0, 3.0), g, Color32::WHITE);
     }
     if compare == Compare::Original {
         let g = painter.layout_no_wrap("ORIGINAL".into(), FontId::proportional(11.0), Color32::WHITE);

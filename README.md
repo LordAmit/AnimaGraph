@@ -61,8 +61,18 @@ Apple Developer account).
 
 - Fonts you add, and your panel and caption-font choices, are stored in
   `~/Library/Application Support/Animagraph/`.
+- Lightroom presets (.xmp, or .dng preset files from Lightroom mobile) can be
+  imported under Styles → Lightroom presets and are kept in the same folder (`presets/`).
+  Their settings fill the matching controls in Edit (light, color,
+  texture, clarity, sharpening, tone curves, HSL, color grading, grain,
+  vignette). The app's own processing gives a close match, not an exact
+  copy. Camera and creative profiles, masks, noise reduction, lens
+  corrections and camera calibration are not used.
 - Loops in the Results strip stay in memory until you close the app.
   Export them to keep them.
+- Camera RAW files (RAF, DNG, CR2/CR3, NEF, ARW, ORF, RW2 and more) and
+  iPhone HEIC photos are developed with the RAW support built into macOS.
+  Very new cameras need a recent macOS version.
 - MP4, MOV and M4V videos open with the video support built into macOS.
   WebM, MKV and AVI need ffmpeg (`brew install ffmpeg`).
 

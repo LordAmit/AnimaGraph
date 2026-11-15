@@ -13,13 +13,17 @@ mod icons;
 mod macvideo;
 #[cfg(target_os = "macos")]
 mod macexport;
+mod develop;
 mod export;
 mod files_panel;
+mod film;
 mod finish;
 mod fonts;
 mod motion;
 mod palette;
 mod panels;
+mod presets;
+mod raw;
 mod render;
 mod sample;
 mod scene;

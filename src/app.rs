@@ -126,6 +126,8 @@ pub enum TaskResult {
     Frames(Option<Vec<RgbaImage>>),
     Saved(Result<PathBuf, String>),
     Video(Result<VideoSource, String>, String),
+    /// A developed RAW photo.
+    Photo(Result<RgbaImage, String>, String),
 }
 
 pub struct Task {
@@ -208,6 +210,25 @@ pub struct StudioApp {
     pub shown_still: Option<RgbaImage>,
     /// Main colors of the shown picture, for the color swatches.
     pub palette: Vec<[u8; 3]>,
+    /// Film simulation: last chosen style, its strength, and preview tiles.
+    pub film_choice: Option<usize>,
+    /// Imported Lightroom presets and the editor's current choices.
+    pub lr_presets: Vec<crate::presets::Preset>,
+    /// A look shown while the pointer rests on a preset (with its name);
+    /// `hover_look` is set during a frame and shown from the next one.
+    pub hover_look: Option<(Look, String)>,
+    pub look_preview: Option<(Look, String)>,
+    pub lr_choice: Option<usize>,
+    pub curve_channel: usize,
+    pub hsl_band: usize,
+    /// The color grading range whose sliders are shown (0 shadows,
+    /// 1 midtones, 2 highlights, 3 global).
+    pub grade_range: usize,
+    pub film_strength: f32,
+    /// Preview tiles for Styles, kept until the picture changes.
+    pub style_thumbs: std::collections::HashMap<String, TextureHandle>,
+    pub style_thumbs_scene: String,
+    pub style_thumb_src: Option<RgbaImage>,
     /// Divider position for the split view, 0 (left) to 1 (right).
     pub split: f32,
     /// The untouched still, for comparing.
@@ -295,6 +316,18 @@ impl StudioApp {
             picking: None,
             shown_still: None,
             palette: Vec::new(),
+            film_choice: None,
+            lr_presets: crate::presets::list(),
+            hover_look: None,
+            look_preview: None,
+            lr_choice: None,
+            curve_channel: 0,
+            hsl_band: 0,
+            grade_range: 0,
+            film_strength: 1.0,
+            style_thumbs: std::collections::HashMap::new(),
+            style_thumbs_scene: String::new(),
+            style_thumb_src: None,
             split: 0.5,
             raw_tex: None,
             border: crate::border::Border::default(),
@@ -344,8 +377,10 @@ impl StudioApp {
     // ----- Loading -------------------------------------------------------
 
     /// Add a newly opened file to the Files panel and switch to it.
-    pub fn set_scene(&mut self, ctx: &egui::Context, scene: Scene) {
+    pub fn set_scene(&mut self, ctx: &egui::Context, mut scene: Scene) {
         self.stash_active();
+        // A new file starts without edits, but keeps the chosen caption font.
+        scene.edits.caption.font = self.caption.font.clone();
         let thumb_img = crate::scene::downscale(&scene.work, 160);
         let thumb = ctx.load_texture(
             format!("thumb_{}_{}", self.files.len(), scene.name),
@@ -372,6 +407,7 @@ impl StudioApp {
 
     /// Put the active scene back into its Files entry.
     fn stash_active(&mut self) {
+        self.save_edits_to_scene();
         if let (Some(i), Some(s)) = (self.active_file, self.scene.take()) {
             if let Some(entry) = self.files.get_mut(i) {
                 entry.scene = Some(s);
@@ -437,7 +473,33 @@ impl StudioApp {
     }
 
     /// Show a scene on the canvas.
+    /// Keep the current look, border and caption with the current file.
+    fn save_edits_to_scene(&mut self) {
+        let edits = crate::scene::Edits { look: self.look, border: self.border, caption: self.caption.clone() };
+        if let Some(s) = &mut self.scene {
+            s.edits = edits;
+        }
+    }
+
+    /// Copy the current look, border and caption to every open file.
+    /// Files opened later start without them.
+    pub fn apply_edits_to_all(&mut self) {
+        let edits = crate::scene::Edits { look: self.look, border: self.border, caption: self.caption.clone() };
+        let mut n = 0;
+        for f in self.files.iter_mut() {
+            if let Some(s) = &mut f.scene {
+                s.edits = edits.clone();
+                n += 1;
+            }
+        }
+        self.save_edits_to_scene();
+        self.status = format!("Applied this file's look, border and caption to {n} other file{}.", if n == 1 { "" } else { "s" });
+    }
+
     fn show_scene(&mut self, _ctx: &egui::Context, scene: Scene) {
+        self.look = scene.edits.look;
+        self.border = scene.edits.border;
+        self.caption = scene.edits.caption.clone();
         self.photo_look = None;
         self.live_pos = 0.0;
         self.mask_tex = None;
@@ -466,13 +528,7 @@ impl StudioApp {
     pub fn open_photo_dialog(&mut self, ctx: &egui::Context) {
         let picked = rfd::FileDialog::new()
             .set_title("Open a photo, a short video, or several photos")
-            .add_filter(
-                "Photos and videos",
-                &[
-                    "jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif", "mp4", "mov", "m4v", "webm",
-                    "avi", "mkv",
-                ],
-            )
+            .add_filter("Photos, RAW and videos", &open_extensions())
             .pick_files();
         if let Some(paths) = picked {
             self.load_paths(ctx, paths);
@@ -576,9 +632,7 @@ impl StudioApp {
         match choice {
             Some(true) => {
                 self.pending_open = None;
-                for p in paths {
-                    self.load_photo(ctx, &p);
-                }
+                self.open_queue.extend(paths);
             }
             Some(false) => {
                 self.pending_open = None;
@@ -663,9 +717,15 @@ impl StudioApp {
     }
 
     /// The still shown on the canvas, with the current look applied.
+    /// The look shown on the canvas: a hovered preset, or the file's own look.
+    pub fn shown_look(&self) -> Look {
+        self.look_preview.as_ref().map(|p| p.0).unwrap_or(self.look)
+    }
+
     pub fn refresh_photo_texture(&mut self, ctx: &egui::Context) {
+        let shown = self.shown_look();
         let Some(scene) = &self.scene else { return };
-        if self.photo_tex.is_some() && self.photo_look == Some(self.look) {
+        if self.photo_tex.is_some() && self.photo_look == Some(shown) {
             return;
         }
         if self.photo_look.is_none() || self.raw_tex.is_none() {
@@ -677,7 +737,7 @@ impl StudioApp {
             }
         }
         let mut img = scene.work.clone();
-        crate::finish::apply_look(&mut img, &self.look);
+        crate::finish::apply_look(&mut img, &shown);
         let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
         match &mut self.photo_tex {
             Some(t) => t.set(color, TextureOptions::LINEAR),
@@ -685,7 +745,7 @@ impl StudioApp {
         }
         self.palette = crate::palette::dominant_colors(&img, 3);
         self.shown_still = Some(img);
-        self.photo_look = Some(self.look);
+        self.photo_look = Some(shown);
     }
 
     /// Advance and redraw the live preview of a video while editing.
@@ -706,7 +766,7 @@ impl StudioApp {
         let rel = if phase < span { phase } else { cycle - phase };
         let idx = (start + rel as usize).min(end);
         let mut frame = crate::video::live_frame(&video.work[idx], &video.work[scene.still_index], &scene.mask, self.freeze_painted);
-        crate::finish::apply_look(&mut frame, &self.look);
+        crate::finish::apply_look(&mut frame, &self.shown_look());
         let color = egui::ColorImage::from_rgba_unmultiplied([frame.width() as usize, frame.height() as usize], frame.as_raw());
         match &mut self.live_tex {
             Some(t) => t.set(color, TextureOptions::LINEAR),
@@ -785,6 +845,25 @@ impl StudioApp {
     }
 
     pub fn load_photo(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        if crate::raw::needs_system_decoder(path) {
+            // RAW (and HEIC) files take a moment to develop: do it in the background.
+            if self.task.is_some() {
+                self.open_queue.push(path.to_path_buf());
+                return;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Photo".into());
+            let p = path.to_path_buf();
+            let progress = Arc::new(Progress::new());
+            let (tx, rx) = channel();
+            let ctx2 = ctx.clone();
+            let n2 = name.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(TaskResult::Photo(crate::raw::decode(&p), n2));
+                ctx2.request_repaint();
+            });
+            self.task = Some(Task { progress, rx, kind: TaskKind::Decode, label: format!("Developing {name}") });
+            return;
+        }
         match open_upright(path) {
             Ok(img) => {
                 let name = path
@@ -921,10 +1000,11 @@ impl StudioApp {
         let format = self.export_format;
         let base = scene.name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_else(|| scene.name.clone());
         let ext = format.extension().unwrap_or("png");
+        let one = [ext];
         let Some(path) = rfd::FileDialog::new()
             .set_title("Save image")
             .set_file_name(format!("{base}_still.{ext}"))
-            .add_filter(format.label(), &[ext])
+            .add_filter(format.label(), if format == Format::Heif { &["heic", "heif"][..] } else { &one[..] })
             .save_file()
         else {
             return;
@@ -1083,6 +1163,14 @@ impl StudioApp {
             }
             (TaskResult::Saved(Err(e)), _) => self.status = format!("Saving failed: {e}"),
             (TaskResult::Video(Ok(v), name), _) => self.set_video(ctx, name, v),
+            (TaskResult::Photo(Ok(img), name), _) => {
+                self.set_scene(ctx, Scene::new(name.clone(), img));
+                self.status = format!("Loaded {name}. Paint the part that should move, or use Auto-detect.");
+            }
+            (TaskResult::Photo(Err(e), name), _) => {
+                self.status = format!("Could not read {name}.");
+                self.error = Some(format!("Could not open {name}.\n\n{e}"));
+            }
             (TaskResult::Video(Err(e), name), _) => {
                 self.status = format!("Could not read {name}.");
                 self.error = Some(format!("Could not open {name}.\n\n{e}"));
@@ -1409,8 +1497,18 @@ fn finish_frame(
     border.apply(&out)
 }
 
+/// Every file type the Open dialog offers.
+fn open_extensions() -> Vec<&'static str> {
+    let mut v = vec![
+        "jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif", "mp4", "mov", "m4v", "webm", "avi", "mkv",
+    ];
+    v.extend(crate::raw::SYSTEM_FORMATS);
+    v.extend(crate::raw::EXTENSIONS);
+    v
+}
+
 /// Open a photo and turn it upright using the orientation the camera saved.
-fn open_upright(path: &std::path::Path) -> image::ImageResult<image::DynamicImage> {
+pub(crate) fn open_upright(path: &std::path::Path) -> image::ImageResult<image::DynamicImage> {
     use image::ImageDecoder;
     let mut decoder = image::ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
@@ -1426,6 +1524,12 @@ impl eframe::App for StudioApp {
         self.handle_dropped_files(&ctx);
         self.shortcuts(&ctx);
         self.refresh_mask_texture(&ctx);
+        // Preview of the preset under the pointer (set during the last frame).
+        let preview = self.hover_look.take();
+        if preview.as_ref().map(|p| &p.0) != self.look_preview.as_ref().map(|p| &p.0) {
+            ctx.request_repaint();
+        }
+        self.look_preview = preview;
         self.refresh_photo_texture(&ctx);
         self.refresh_caption_texture(&ctx);
         self.screenshot_tick(&ctx);

@@ -31,7 +31,7 @@ fn is_open(app: &StudioApp, key: &str) -> bool {
 }
 
 /// Every panel the View menu can show or hide: (key, name).
-pub const PANELS: [(&str, &str); 9] = [
+pub const PANELS: [(&str, &str); 17] = [
     ("region", "Moving region / selected area"),
     ("motion", "Motion"),
     ("loop", "Loop"),
@@ -40,6 +40,14 @@ pub const PANELS: [(&str, &str); 9] = [
     ("border", "Border"),
     ("caption", "Caption"),
     ("look", "Look"),
+    ("lr", "Lightroom presets"),
+    ("film", "Film Simulation"),
+    ("adj_light", "Light"),
+    ("adj_color", "Color"),
+    ("adj_effects", "Effects"),
+    ("adj_curve", "Tone curve"),
+    ("adj_hsl", "HSL / Color"),
+    ("adj_grade", "Color grading"),
     ("export", "Export"),
 ];
 
@@ -116,20 +124,6 @@ pub fn top_bar(app: &mut StudioApp, ui: &mut egui::Ui) {
     });
 }
 
-/// Settings-bar panels grouped as they appear in the View menu.
-pub const MOTION_PANELS: [(&str, &str); 4] = [
-    ("region", "Moving region / selected area"),
-    ("motion", "Motion"),
-    ("loop", "Loop"),
-    ("video", "Video"),
-];
-pub const IMAGE_PANELS: [(&str, &str); 4] = [
-    ("crop", "Rotate & crop"),
-    ("border", "Border"),
-    ("caption", "Caption"),
-    ("look", "Look"),
-];
-
 fn view_toggle(ui: &mut egui::Ui, app: &mut StudioApp, key: &str, name: &str) {
     let mut on = app.panel_visible(key);
     if ui.checkbox(&mut on, name).changed() {
@@ -137,36 +131,21 @@ fn view_toggle(ui: &mut egui::Ui, app: &mut StudioApp, key: &str, name: &str) {
     }
 }
 
-/// A View submenu: one button that shows or hides the whole group, then
-/// a checkbox per panel.
-fn view_group(ui: &mut egui::Ui, app: &mut StudioApp, title: &str, panels: &[(&str, &str)]) {
-    ui.menu_button(title, |ui| {
-        ui.set_min_width(240.0);
-        let all_on = panels.iter().all(|(k, _)| app.panel_visible(k));
-        let label = if all_on { "Hide all" } else { "Show all" };
-        let b = egui::Button::new(egui::RichText::new(label).strong()).min_size(Vec2::new(ui.available_width(), 26.0));
-        if ui.add(b).on_hover_text(format!("Show or hide every {title} panel at once")).clicked() {
-            for (k, _) in panels {
-                app.set_panel_visible(k, !all_on);
-            }
-        }
-        ui.separator();
-        for (key, name) in panels {
-            view_toggle(ui, app, key, name);
-        }
-    });
-}
-
 /// View menu: show or hide each panel, fold or unfold them all.
 fn view_menu(app: &mut StudioApp, ui: &mut egui::Ui) {
-    ui.menu_button(egui::RichText::new("View").size(13.5), |ui| {
+    // Stay open while toggling items; close on a click outside the menu or Esc.
+    let config = egui::containers::menu::MenuConfig::new()
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(egui::RichText::new("View").size(13.5)).config(config).ui(ui, |ui| {
         ui.set_min_width(230.0);
         view_toggle(ui, app, "files", "Files panel");
         view_toggle(ui, app, "results", "Results strip");
         view_toggle(ui, app, "controls", "Settings bar (right)");
         ui.separator();
-        view_group(ui, app, "Motion", &MOTION_PANELS);
-        view_group(ui, app, "Image", &IMAGE_PANELS);
+        ui.label(egui::RichText::new("Settings bar sections").size(11.0).color(theme::TEXT_DIM));
+        view_toggle(ui, app, "animate", "Animate");
+        view_toggle(ui, app, "edit", "Edit");
+        view_toggle(ui, app, "styles", "Styles");
         view_toggle(ui, app, "export", "Export");
         ui.separator();
         if ui.button("Show everything").clicked() {
@@ -191,48 +170,87 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
         // Keep everything inside the bar's width.
         ui.set_max_width(ui.available_width().min(312.0));
         let is_video = app.scene.as_ref().is_some_and(|s| s.is_video());
-        let (title, sub) = if is_video {
+
+        // Animate: what moves, how, and the button that makes the loop.
+        let (title, intro) = if is_video {
             ("Freeze part of a video", "Select an area, choose whether it freezes or plays, then press Make loop.")
         } else {
-            ("Animate a photo", "Paint the area to animate, draw arrows in the direction of motion, then press Animate.")
+            ("Animate", "Paint the area to animate, draw arrows in the direction of motion, then press Animate.")
         };
-        ui.label(egui::RichText::new(title).size(18.0).strong());
-        ui.label(egui::RichText::new(sub).color(theme::TEXT_DIM));
-        ui.add_space(2.0);
-
-        let is_video = app.scene.as_ref().is_some_and(|s| s.is_video());
-        if app.panel_visible("region") {
-            region_card(app, ui);
-        }
-        if is_video {
-            if app.panel_visible("video") {
-                crate::panels::video_card(app, ui);
-            }
-        } else {
-            if app.panel_visible("motion") {
-                motion_card(app, ui);
-            }
-            if app.panel_visible("loop") {
-                loop_card(app, ui);
-            }
+        if app.panel_visible("animate") {
+            drawer(app, ui, "drawer_animate", Icon::Sparkle, title, intro, |app, ui| {
+                region_card(app, ui);
+                if is_video {
+                    crate::panels::video_card(app, ui);
+                } else {
+                    motion_card(app, ui);
+                    loop_card(app, ui);
+                }
+                generate_block(app, ui);
+            });
         }
 
-        if app.panel_visible("crop") {
-            crate::panels::crop_card(app, ui);
+        // Edit: changes to the picture or video frames.
+        if app.panel_visible("edit") {
+            drawer(
+                app,
+                ui,
+                "drawer_edit",
+                Icon::Image,
+                "Edit",
+                "Rotate, crop, add a border or caption, and adjust colors. Applies to saved images, loops and videos.",
+                |app, ui| {
+                    let others = app.files.len().saturating_sub(1);
+                    let b = icons::button(Icon::Image, "Apply edits to all files", theme::TEXT);
+                    if ui
+                        .add_enabled(others > 0, b)
+                        .on_hover_text(
+                            "Copies this file's look, border and caption to the other open files. \
+                             Files opened later start without them. Crop and rotation are not copied.",
+                        )
+                        .on_disabled_hover_text("Open more than one file to use this")
+                        .clicked()
+                    {
+                        app.apply_edits_to_all();
+                    }
+                    crate::panels::crop_card(app, ui);
+                    crate::panels::border_card(app, ui);
+                    crate::panels::caption_card(app, ui);
+                    crate::panels::adjust_card(app, ui);
+                },
+            );
         }
-        if app.panel_visible("border") {
-            crate::panels::border_card(app, ui);
+
+        // Styles: looks, Lightroom presets and film simulations, as previews.
+        if app.panel_visible("styles") {
+            drawer(
+                app,
+                ui,
+                "drawer_styles",
+                Icon::Film,
+                "Styles",
+                "Hover a tile to preview it on the picture, click to apply. Fine-tune it in Edit.",
+                |app, ui| {
+                    crate::panels::look_card(app, ui);
+                    crate::panels::lightroom_card(app, ui);
+                    crate::panels::film_card(app, ui);
+                },
+            );
         }
-        if app.panel_visible("caption") {
-            crate::panels::caption_card(app, ui);
-        }
-        if app.panel_visible("look") {
-            crate::panels::look_card(app, ui);
-        }
-        generate_block(app, ui);
+
+        // Export: saving.
         if app.panel_visible("export") {
-            export_card(app, ui);
+            drawer(
+                app,
+                ui,
+                "drawer_export",
+                Icon::Download,
+                "Export",
+                "Save the selected loop, or a still image.",
+                |app, ui| export_card(app, ui),
+            );
         }
+
         ui.add_space(4.0);
         if ui
             .add(icons::button(Icon::Undo, "Reset all settings", theme::TEXT_DIM).fill(Color32::TRANSPARENT))
@@ -243,6 +261,52 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
         }
         ui.add_space(8.0);
     });
+}
+
+/// A category drawer: a large clickable header that folds its contents.
+fn drawer(
+    app: &mut StudioApp,
+    ui: &mut egui::Ui,
+    key: &str,
+    icon: Icon,
+    title: &str,
+    intro: &str,
+    body: impl FnOnce(&mut StudioApp, &mut egui::Ui),
+) {
+    let open = !app.prefs.collapsed.contains(key);
+    let width = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::click());
+    let hovered = resp.hovered();
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(10),
+        if hovered { Color32::from_rgb(40, 40, 50) } else { Color32::from_rgb(34, 34, 43) },
+    );
+    painter.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+    let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
+    let c = rect.left_center();
+    chevron.image(14.0, theme::TEXT_DIM).paint_at(ui, Rect::from_center_size(c + Vec2::new(16.0, 0.0), Vec2::splat(14.0)));
+    icon.image(18.0, theme::ACCENT).paint_at(ui, Rect::from_center_size(c + Vec2::new(40.0, 0.0), Vec2::splat(18.0)));
+    ui.painter().text(
+        c + Vec2::new(58.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(15.5),
+        theme::TEXT,
+    );
+    if resp.on_hover_text(if open { "Fold" } else { "Unfold" }).clicked() {
+        if open {
+            app.prefs.collapsed.insert(key.to_string());
+        } else {
+            app.prefs.collapsed.remove(key);
+        }
+    }
+    if open {
+        ui.label(egui::RichText::new(intro).size(12.5).color(theme::TEXT_DIM));
+        body(app, ui);
+        ui.add_space(6.0);
+    }
 }
 
 fn tool_chip(ui: &mut egui::Ui, app: &mut StudioApp, tool: Tool, icon: Icon, label: &str) {
@@ -433,13 +497,24 @@ fn motion_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                     }
                 }
             });
-            if ui.button("Clear arrows and pins").clicked() {
-                if let Some(s) = &mut app.scene {
-                    s.checkpoint();
-                    s.arrows.clear();
-                    s.pins.clear();
+            // Separate buttons: arrows and pins are often cleared on their own.
+            let (n_arrows, n_pins) = app.scene.as_ref().map_or((0, 0), |s| (s.arrows.len(), s.pins.len()));
+            ui.horizontal(|ui| {
+                let b = icons::button(Icon::Trash, "Remove arrows", theme::TEXT);
+                if ui.add_enabled(n_arrows > 0, b).on_hover_text("Remove every motion arrow (undo with Cmd+Z)").clicked() {
+                    if let Some(s) = &mut app.scene {
+                        s.checkpoint();
+                        s.arrows.clear();
+                    }
                 }
-            }
+                let b = icons::button(Icon::Trash, "Remove pins", theme::TEXT);
+                if ui.add_enabled(n_pins > 0, b).on_hover_text("Remove every pin (undo with Cmd+Z)").clicked() {
+                    if let Some(s) = &mut app.scene {
+                        s.checkpoint();
+                        s.pins.clear();
+                    }
+                }
+            });
         });
     });
 }
@@ -513,29 +588,27 @@ fn generate_block(app: &mut StudioApp, ui: &mut egui::Ui) {
 fn export_card(app: &mut StudioApp, ui: &mut egui::Ui) {
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        fold_title(ui, app, "export", "4  Export");
-        if !is_open(app, "export") {
-            return;
-        }
         ui.horizontal(|ui| {
             ui.label("Format");
             egui::ComboBox::from_id_salt("format")
                 .selected_text(app.export_format.label())
                 .width(150.0)
                 .show_ui(ui, |ui| {
+                    ui.label(egui::RichText::new("STILL IMAGE").size(11.0).strong().color(theme::TEXT_DIM));
+                    for f in [Format::Png, Format::Jpeg, Format::Heif] {
+                        ui.selectable_value(&mut app.export_format, f, f.label())
+                            .on_hover_text("Single still image with look, crop, caption and border");
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("ANIMATION").size(11.0).strong().color(theme::TEXT_DIM));
                     ui.selectable_value(&mut app.export_format, Format::Gif, Format::Gif.label());
-                    ui.selectable_value(&mut app.export_format, Format::PngFrames, Format::PngFrames.label());
                     ui.add_enabled_ui(app.ffmpeg, |ui| {
                         for f in [Format::Mp4, Format::Mov] {
                             ui.selectable_value(&mut app.export_format, f, f.label())
                                 .on_disabled_hover_text("Saving video needs ffmpeg on this computer");
                         }
                     });
-                    ui.separator();
-                    for f in [Format::Png, Format::Jpeg] {
-                        ui.selectable_value(&mut app.export_format, f, f.label())
-                            .on_hover_text("Single still image with look, crop, caption and border");
-                    }
+                    ui.selectable_value(&mut app.export_format, Format::PngFrames, Format::PngFrames.label());
                 });
         });
         if app.export_format.is_video() {
@@ -862,7 +935,6 @@ fn loop_style(app: &mut StudioApp, ui: &mut egui::Ui) {
 
 /// Color look presets and fine adjustments.
 pub fn look_card(app: &mut StudioApp, ui: &mut egui::Ui) {
-    let has_scene = app.scene.is_some();
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -876,51 +948,581 @@ pub fn look_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         if !is_open(app, "look") {
             return;
         }
-        ui.add_enabled_ui(has_scene, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                for (name, preset) in crate::finish::Look::presets() {
-                    let sel = app.look == preset;
-                    let b = egui::Button::new(egui::RichText::new(name).size(12.0).color(if sel {
-                        Color32::WHITE
-                    } else {
-                        theme::TEXT
-                    }))
-                    .fill(if sel { theme::ACCENT } else { theme::PANEL })
-                    .corner_radius(CornerRadius::same(12));
-                    if ui.add(b).clicked() {
-                        app.look = preset;
-                    }
+        let tiles: Vec<Tile> = crate::finish::Look::presets()
+            .into_iter()
+            .map(|(name, look)| Tile {
+                key: format!("look:{name}"),
+                name: name.to_string(),
+                note: String::new(),
+                look,
+                thumb_look: look,
+                removable: false,
+            })
+            .collect();
+        if let Some(TileAction::Apply(i)) = tile_grid(app, ui, &tiles) {
+            app.look = tiles[i].look;
+        }
+    });
+}
+
+/// Imported Lightroom presets as preview tiles, with Import.
+pub fn lightroom_card(app: &mut StudioApp, ui: &mut egui::Ui) {
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            fold_title(ui, app, "lr", "Lightroom presets");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(icons::button(Icon::Plus, egui::RichText::new("Import").size(12.0), theme::TEXT))
+                    .on_hover_text("Import Lightroom presets: .xmp files, or .dng preset files from Lightroom mobile. They are kept in the app.")
+                    .clicked()
+                {
+                    import_presets(app);
                 }
             });
-            let l = &mut app.look;
-            with_reset!(ui, l.exposure, 0.0, egui::Slider::new(&mut l.exposure, -1.0..=1.0).text("Exposure"));
-            with_reset!(ui, l.contrast, 0.0, egui::Slider::new(&mut l.contrast, -0.5..=0.5).text("Contrast"));
-            with_reset!(ui, l.saturation, 0.0, egui::Slider::new(&mut l.saturation, -1.0..=1.0).text("Saturation"));
-            with_reset!(ui, l.warmth, 0.0, egui::Slider::new(&mut l.warmth, -1.0..=1.0).text("Warmth"));
-            with_reset!(ui, l.fade, 0.0, egui::Slider::new(&mut l.fade, 0.0..=1.0).text("Fade").fixed_decimals(2));
-            with_reset!(ui, l.vignette, 0.0, egui::Slider::new(&mut l.vignette, 0.0..=1.0).text("Vignette").fixed_decimals(2));
-            ui.label(egui::RichText::new("Tone curve").size(12.0).color(theme::TEXT_DIM));
-            with_reset!(ui, l.s_curve, 0.0, egui::Slider::new(&mut l.s_curve, -1.0..=1.0).text("S-curve").fixed_decimals(2))
-                ;
-            with_reset!(
-                ui,
-                l.pivot,
-                crate::finish::DEFAULT_PIVOT,
-                egui::Slider::new(&mut l.pivot, 0.1..=0.9).text("Pivot").fixed_decimals(2)
+        });
+        if !is_open(app, "lr") {
+            return;
+        }
+        if app.lr_presets.is_empty() {
+            ui.label(
+                egui::RichText::new("No presets yet. Import .xmp or .dng preset files; they are kept in the app.")
+                    .size(12.0)
+                    .color(theme::TEXT_DIM),
             );
-            with_reset!(ui, l.shadows, 0.0, egui::Slider::new(&mut l.shadows, -1.0..=1.0).text("Shadows").fixed_decimals(2));
-            with_reset!(ui, l.highlights, 0.0, egui::Slider::new(&mut l.highlights, -1.0..=1.0).text("Highlights").fixed_decimals(2));
-            ui.label(egui::RichText::new("Grain").size(12.0).color(theme::TEXT_DIM));
-            with_reset!(ui, l.grain, 0.0, egui::Slider::new(&mut l.grain, 0.0..=1.0).text("Amount").fixed_decimals(2));
-            with_reset!(
-                ui,
-                l.grain_size,
-                crate::finish::DEFAULT_GRAIN_SIZE,
-                egui::Slider::new(&mut l.grain_size, 1.0..=4.0).text("Size").fixed_decimals(1)
-            );
+            return;
+        }
+        let tiles: Vec<Tile> = app
+            .lr_presets
+            .iter()
+            .map(|p| Tile {
+                key: format!("lr:{}", p.path.display()),
+                name: p.name.clone(),
+                note: "Right-click to remove".into(),
+                look: p.look,
+                thumb_look: p.look,
+                removable: true,
+            })
+            .collect();
+        match tile_grid(app, ui, &tiles) {
+            Some(TileAction::Apply(i)) => {
+                app.lr_choice = Some(i);
+                app.look = tiles[i].look;
+                app.status = format!("Applied the {} preset. Fine-tune it in Edit.", tiles[i].name);
+            }
+            Some(TileAction::Remove(i)) => match crate::presets::remove(&app.lr_presets[i]) {
+                Ok(()) => {
+                    app.lr_presets = crate::presets::list();
+                    app.lr_choice = None;
+                }
+                Err(e) => app.status = e,
+            },
+            None => {}
+        }
+    });
+}
+
+fn import_presets(app: &mut StudioApp) {
+    let Some(files) = rfd::FileDialog::new()
+        .set_title("Import Lightroom presets")
+        .add_filter("Lightroom presets", &["xmp", "dng"])
+        .pick_files()
+    else {
+        return;
+    };
+    let mut ok = 0;
+    let mut failed = Vec::new();
+    for f in files {
+        match crate::presets::import(&f) {
+            Ok(_) => ok += 1,
+            Err(e) => failed.push(e),
+        }
+    }
+    app.lr_presets = crate::presets::list();
+    app.status = format!("Imported {ok} preset{}.", if ok == 1 { "" } else { "s" });
+    if !failed.is_empty() {
+        app.error = Some(failed.join("\n"));
+    }
+}
+
+// ----- Preview tiles ----------------------------------------------------------
+
+/// One preview tile: a style shown on the current picture.
+struct Tile {
+    key: String,
+    name: String,
+    note: String,
+    /// What a click applies (and hover previews).
+    look: crate::finish::Look,
+    /// What the thumbnail shows.
+    thumb_look: crate::finish::Look,
+    removable: bool,
+}
+
+enum TileAction {
+    Apply(usize),
+    Remove(usize),
+}
+
+/// Two columns of tiles. Thumbnails are made a few per frame and kept until
+/// the picture changes. Hovering previews the style on the canvas.
+fn tile_grid(app: &mut StudioApp, ui: &mut egui::Ui, tiles: &[Tile]) -> Option<TileAction> {
+    let Some(scene) = &app.scene else {
+        ui.label(egui::RichText::new("Open a photo or video to see previews.").size(12.0).color(theme::TEXT_DIM));
+        return None;
+    };
+    let [iw, ih] = scene.work_size();
+    let scene_key = format!("{}:{iw}x{ih}:{}", scene.id, scene.still_index);
+    if app.style_thumbs_scene != scene_key {
+        app.style_thumbs.clear();
+        app.style_thumb_src = Some(crate::scene::downscale(&scene.work, 220));
+        app.style_thumbs_scene = scene_key;
+    }
+    let mut budget = 6;
+    let mut waiting = false;
+    for t in tiles {
+        if app.style_thumbs.contains_key(&t.key) {
+            continue;
+        }
+        if budget == 0 {
+            waiting = true;
+            break;
+        }
+        budget -= 1;
+        if let Some(src) = &app.style_thumb_src {
+            let mut img = src.clone();
+            crate::finish::apply_look(&mut img, &t.thumb_look);
+            let c = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+            let tex = ui.ctx().load_texture(format!("style:{}", t.key), c, egui::TextureOptions::LINEAR);
+            app.style_thumbs.insert(t.key.clone(), tex);
+        }
+    }
+    if waiting {
+        ui.ctx().request_repaint();
+    }
+
+    let gap = 8.0;
+    let tile_w = ((ui.available_width() - gap) / 2.0).floor();
+    let img_h = (tile_w * 0.62).round();
+    let mut action = None;
+    for (row, pair) in tiles.chunks(2).enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (col, t) in pair.iter().enumerate() {
+                let i = row * 2 + col;
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(tile_w, img_h + 22.0), Sense::click());
+                let selected = app.look == t.look;
+                let img_rect = Rect::from_min_size(rect.min, Vec2::new(tile_w, img_h));
+                ui.painter().rect_filled(img_rect, CornerRadius::same(6), theme::BG);
+                if let Some(tex) = app.style_thumbs.get(&t.key) {
+                    // Fit inside the frame without stretching; bars fill the rest.
+                    let [tw, th] = tex.size();
+                    let k = (img_rect.width() / tw as f32).min(img_rect.height() / th as f32);
+                    let fitted = Rect::from_center_size(img_rect.center(), Vec2::new(tw as f32 * k, th as f32 * k));
+                    ui.painter().image(tex.id(), fitted, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                }
+                ui.painter().rect_stroke(
+                    img_rect,
+                    CornerRadius::same(6),
+                    Stroke::new(
+                        if selected { 2.5 } else { 1.0 },
+                        if selected {
+                            theme::ACCENT
+                        } else if resp.hovered() {
+                            theme::TEXT_DIM
+                        } else {
+                            theme::BORDER
+                        },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                // Name, cut to the tile width.
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    t.name.clone(),
+                    egui::FontId::proportional(12.5),
+                    if selected { Color32::WHITE } else { theme::TEXT },
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(tile_w - 4.0);
+                let galley = ui.painter().layout_job(job);
+                ui.painter().galley(Pos2::new(rect.left() + 2.0, rect.bottom() - 18.0), galley, theme::TEXT);
+
+                if resp.hovered() {
+                    app.hover_look = Some((t.look, t.name.clone()));
+                }
+                let tip = if t.note.is_empty() { t.name.clone() } else { format!("{}\n{}", t.name, t.note) };
+                let resp = resp.on_hover_text(tip);
+                if resp.clicked() {
+                    action = Some(TileAction::Apply(i));
+                }
+                if t.removable {
+                    resp.context_menu(|ui| {
+                        if ui.button("Remove").clicked() {
+                            action = Some(TileAction::Remove(i));
+                            ui.close();
+                        }
+                    });
+                }
+            }
+        });
+    }
+    action
+}
+
+/// The fine adjustment sliders (light, color, tone curve, grain).
+/// The adjustment controls, each section its own folding card in Edit.
+pub fn adjust_card(app: &mut StudioApp, ui: &mut egui::Ui) {
+    edit_section(app, ui, "adj_light", "Light", &mut |app: &mut StudioApp, ui: &mut egui::Ui| {
+        let l = &mut app.look;
+        with_reset!(ui, l.exposure, 0.0, egui::Slider::new(&mut l.exposure, -2.0..=2.0).text("Exposure").fixed_decimals(2));
+        with_reset!(ui, l.contrast, 0.0, pct(&mut l.contrast, -0.5, 0.5, "Contrast", 200.0));
+        with_reset!(ui, l.highlights, 0.0, pct(&mut l.highlights, -1.0, 1.0, "Highlights", 100.0));
+        with_reset!(ui, l.shadows, 0.0, pct(&mut l.shadows, -1.0, 1.0, "Shadows", 100.0));
+        with_reset!(ui, l.whites, 0.0, pct(&mut l.whites, -1.0, 1.0, "Whites", 100.0));
+        with_reset!(ui, l.blacks, 0.0, pct(&mut l.blacks, -1.0, 1.0, "Blacks", 100.0));
+    });
+
+    edit_section(app, ui, "adj_color", "Color", &mut |app: &mut StudioApp, ui: &mut egui::Ui| {
+        let l = &mut app.look;
+        with_reset!(ui, l.warmth, 0.0, pct(&mut l.warmth, -1.0, 1.0, "Temperature", 100.0));
+        with_reset!(ui, l.tint, 0.0, pct(&mut l.tint, -1.0, 1.0, "Tint", 100.0));
+        with_reset!(ui, l.vibrance, 0.0, pct(&mut l.vibrance, -1.0, 1.0, "Vibrance", 100.0));
+        with_reset!(ui, l.saturation, 0.0, pct(&mut l.saturation, -1.0, 1.0, "Saturation", 100.0));
+    });
+
+    edit_section(app, ui, "adj_effects", "Effects", &mut |app: &mut StudioApp, ui: &mut egui::Ui| {
+        use crate::finish::{DEFAULT_GRAIN_ROUGH, DEFAULT_GRAIN_SIZE, DEFAULT_VIGNETTE_FEATHER, DEFAULT_VIGNETTE_MID};
+        let l = &mut app.look;
+        with_reset!(ui, l.texture, 0.0, pct(&mut l.texture, -1.0, 1.0, "Texture", 100.0));
+        with_reset!(ui, l.clarity, 0.0, pct(&mut l.clarity, -1.0, 1.0, "Clarity", 100.0));
+        with_reset!(ui, l.dehaze, 0.0, pct(&mut l.dehaze, -1.0, 1.0, "Dehaze", 100.0));
+        with_reset!(ui, l.sharpen, 0.0, pct(&mut l.sharpen, 0.0, 1.0, "Sharpening", 100.0));
+        with_reset!(ui, l.fade, 0.0, pct(&mut l.fade, 0.0, 1.0, "Fade", 100.0));
+
+        sub_heading(ui, "Vignette");
+        with_reset!(ui, l.vignette, 0.0, pct(&mut l.vignette, -1.0, 1.0, "Amount", 100.0));
+        ui.label(egui::RichText::new("Positive darkens the edges, negative lightens them.").size(11.0).color(theme::TEXT_DIM));
+        ui.add_enabled_ui(l.vignette != 0.0, |ui| {
+            with_reset!(ui, l.vignette_mid, DEFAULT_VIGNETTE_MID, pct(&mut l.vignette_mid, 0.0, 1.0, "Midpoint", 100.0));
+            with_reset!(ui, l.vignette_feather, DEFAULT_VIGNETTE_FEATHER, pct(&mut l.vignette_feather, 0.0, 1.0, "Feather", 100.0));
+            with_reset!(ui, l.vignette_round, 0.0, pct(&mut l.vignette_round, -1.0, 1.0, "Roundness", 100.0));
+        });
+
+        sub_heading(ui, "Grain");
+        with_reset!(ui, l.grain, 0.0, pct(&mut l.grain, 0.0, 1.0, "Amount", 100.0));
+        ui.add_enabled_ui(l.grain > 0.0, |ui| {
+            with_reset!(ui, l.grain_size, DEFAULT_GRAIN_SIZE, egui::Slider::new(&mut l.grain_size, 1.0..=4.0).text("Size").fixed_decimals(1));
+            with_reset!(ui, l.grain_rough, DEFAULT_GRAIN_ROUGH, pct(&mut l.grain_rough, 0.0, 1.0, "Roughness", 100.0));
         });
     });
+
+    edit_section(app, ui, "adj_curve", "Tone curve", &mut |app: &mut StudioApp, ui: &mut egui::Ui| {
+        ui.horizontal(|ui| {
+            for (i, name) in ["RGB", "Red", "Green", "Blue"].iter().enumerate() {
+                if ui.selectable_label(app.curve_channel == i, *name).clicked() {
+                    app.curve_channel = i;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let ch = app.curve_channel;
+                if ui
+                    .add_enabled(!app.look.curves[ch].is_identity(), egui::Button::new("Reset").small())
+                    .on_hover_text("Straighten this curve")
+                    .clicked()
+                {
+                    app.look.curves[ch] = crate::develop::Curve::default();
+                }
+            });
+        });
+        let ch = app.curve_channel;
+        let color = [theme::TEXT, Color32::from_rgb(235, 90, 90), Color32::from_rgb(90, 200, 110), Color32::from_rgb(90, 140, 240)][ch];
+        curve_editor(ui, &mut app.look.curves[ch], color);
+        ui.label(
+            egui::RichText::new("Drag points. Click to add, right-click to remove.")
+                .size(11.0)
+                .color(theme::TEXT_DIM),
+        );
+        let l = &mut app.look;
+        with_reset!(ui, l.s_curve, 0.0, pct(&mut l.s_curve, -1.0, 1.0, "S-curve", 100.0));
+        with_reset!(ui, l.pivot, crate::finish::DEFAULT_PIVOT, egui::Slider::new(&mut l.pivot, 0.1..=0.9).text("Pivot").fixed_decimals(2));
+    });
+
+    edit_section(app, ui, "adj_hsl", "HSL / Color", &mut |app: &mut StudioApp, ui: &mut egui::Ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (i, c) in crate::develop::HSL_SWATCH.iter().enumerate() {
+                let sel = app.hsl_band == i;
+                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+                ui.painter().circle_filled(rect.center(), 9.0, Color32::from_rgb(c[0], c[1], c[2]));
+                if sel {
+                    ui.painter().circle_stroke(rect.center(), 11.0, Stroke::new(2.0, Color32::WHITE));
+                }
+                if resp.on_hover_text(crate::develop::HSL_NAMES[i]).clicked() {
+                    app.hsl_band = i;
+                }
+            }
+        });
+        let b = app.hsl_band;
+        ui.label(egui::RichText::new(crate::develop::HSL_NAMES[b]).size(12.0).color(theme::TEXT_DIM));
+        let band = &mut app.look.hsl[b];
+        with_reset!(ui, band[0], 0.0, pct(&mut band[0], -1.0, 1.0, "Hue", 100.0));
+        with_reset!(ui, band[1], 0.0, pct(&mut band[1], -1.0, 1.0, "Saturation", 100.0));
+        with_reset!(ui, band[2], 0.0, pct(&mut band[2], -1.0, 1.0, "Luminance", 100.0));
+    });
+
+    edit_section(app, ui, "adj_grade", "Color grading", &mut |app: &mut StudioApp, ui: &mut egui::Ui| {
+        const RANGES: [&str; 4] = ["Shadows", "Midtones", "Highlights", "Global"];
+        ui.label(
+            egui::RichText::new(
+                "Tint the dark, middle and bright parts of the picture, or all of it with Global. \
+                 Click or drag on a wheel to pick the tint; the center means no tint.",
+            )
+            .size(11.0)
+            .color(theme::TEXT_DIM),
+        );
+        ui.add_space(4.0);
+        let gap = 8.0;
+        let w = ((ui.available_width() - 2.0 * gap) / 3.0).min(96.0).floor();
+        // One wheel with its name below; picking on it selects the range.
+        let wheel = |app: &mut StudioApp, ui: &mut egui::Ui, i: usize| {
+            ui.allocate_ui_with_layout(Vec2::new(w, w + 20.0), egui::Layout::top_down(egui::Align::Center), |ui| {
+                let sel = app.grade_range == i;
+                let g = &mut app.look.grade[i];
+                let resp = grade_wheel(ui, w, g, sel)
+                    .on_hover_text("Click or drag to pick the tint. Double-click to remove it.");
+                let (rect, label) = ui.allocate_exact_size(Vec2::new(w, 16.0), Sense::click());
+                let color = if sel { theme::TEXT } else { theme::TEXT_DIM };
+                let text = ui.painter().layout_no_wrap(RANGES[i].to_string(), egui::FontId::proportional(12.0), color);
+                let left = rect.center().x - (text.size().x + 14.0) * 0.5;
+                ui.painter().circle_filled(Pos2::new(left + 5.0, rect.center().y), 5.0, tint_color(g));
+                ui.painter().galley(Pos2::new(left + 14.0, rect.center().y - text.size().y * 0.5), text, color);
+                if resp.is_pointer_button_down_on() || resp.clicked() || label.clicked() {
+                    app.grade_range = i;
+                }
+            });
+        };
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for i in 0..3 {
+                wheel(app, ui, i);
+            }
+        });
+        ui.horizontal_top(|ui| {
+            ui.add_space(w + gap);
+            wheel(app, ui, 3);
+        });
+        ui.add_space(4.0);
+
+        let r = app.grade_range;
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 6.0, tint_color(&app.look.grade[r]));
+            ui.label(egui::RichText::new(RANGES[r]).size(12.0).color(theme::TEXT));
+        });
+        let g = &mut app.look.grade[r];
+        with_reset!(ui, g[0], 0.0, egui::Slider::new(&mut g[0], 0.0..=360.0).text("Hue").suffix("°").fixed_decimals(0));
+        with_reset!(ui, g[1], 0.0, pct(&mut g[1], 0.0, 1.0, "Saturation", 100.0));
+        with_reset!(ui, g[2], 0.0, pct(&mut g[2], -1.0, 1.0, "Luminance", 100.0));
+        ui.add_space(4.0);
+        let l = &mut app.look;
+        with_reset!(ui, l.grade_blend, crate::finish::DEFAULT_BLEND, pct(&mut l.grade_blend, 0.0, 1.0, "Blending", 100.0));
+        with_reset!(ui, l.grade_balance, 0.0, pct(&mut l.grade_balance, -1.0, 1.0, "Balance", 100.0));
+    });
+}
+
+/// A small dim heading for a group of sliders inside a card.
+fn sub_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(text).size(12.0).color(theme::TEXT_DIM));
+}
+
+/// The tint a color grading range adds: grey when it adds none.
+fn tint_color(g: &[f32]) -> Color32 {
+    let rgb = crate::develop::hsl_to_rgb([g[0], g[1].clamp(0.0, 1.0), 0.5]);
+    Color32::from_rgb((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8)
+}
+
+/// A color wheel for one grading range. The angle sets the hue in degrees
+/// (red to the right, counter-clockwise), the distance from the center sets
+/// the saturation (0 to 1). Double-click removes the tint.
+fn grade_wheel(ui: &mut egui::Ui, size: f32, g: &mut [f32; 3], selected: bool) -> egui::Response {
+    let [hue, sat, _] = g;
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click_and_drag());
+    let c = rect.center();
+    let r = size * 0.5 - 4.0;
+    if resp.double_clicked() {
+        *hue = 0.0;
+        *sat = 0.0;
+        resp.mark_changed();
+    } else if resp.is_pointer_button_down_on() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let d = p - c;
+            let dist = d.length();
+            *sat = (dist / r).clamp(0.0, 1.0);
+            if dist > 0.5 {
+                *hue = (-d.y).atan2(d.x).to_degrees().rem_euclid(360.0);
+            }
+            resp.mark_changed();
+        }
+    }
+
+    // Wheel: rings from grey in the center to full color at the rim.
+    let color = |h: f32, s: f32| tint_color(&[h, s]);
+    let (segments, rings) = (72usize, 4usize);
+    let mut mesh = egui::Mesh::default();
+    for k in 0..=rings {
+        let s = k as f32 / rings as f32;
+        for j in 0..segments {
+            let h = j as f32 * 360.0 / segments as f32;
+            let a = h.to_radians();
+            let pos = c + Vec2::new(a.cos(), -a.sin()) * (s * r);
+            mesh.colored_vertex(pos, color(h, s));
+        }
+    }
+    for k in 0..rings {
+        for j in 0..segments {
+            let n = segments as u32;
+            let (k, j) = (k as u32, j as u32);
+            let a = k * n + j;
+            let b = k * n + (j + 1) % n;
+            let cc = (k + 1) * n + j;
+            let d = (k + 1) * n + (j + 1) % n;
+            mesh.add_triangle(a, cc, d);
+            mesh.add_triangle(a, d, b);
+        }
+    }
+    let painter = ui.painter();
+    painter.add(egui::Shape::mesh(mesh));
+    let hovered = resp.hovered() || resp.dragged();
+    painter.circle_stroke(c, r, Stroke::new(1.0, if hovered { theme::TEXT_DIM } else { theme::BORDER }));
+    if selected {
+        painter.circle_stroke(c, r + 2.5, Stroke::new(2.0, theme::ACCENT));
+    }
+
+    // Marker at the chosen tint.
+    let a = hue.to_radians();
+    let m = c + Vec2::new(a.cos(), -a.sin()) * (*sat * r);
+    painter.circle_filled(m, 5.0, tint_color(&[*hue, *sat]));
+    painter.circle_stroke(m, 5.0, Stroke::new(1.5, Color32::WHITE));
+    painter.circle_stroke(m, 6.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
+    resp
+}
+
+/// One folding card in Edit, greyed out until a file is open.
+fn edit_section(
+    app: &mut StudioApp,
+    ui: &mut egui::Ui,
+    key: &str,
+    title: &str,
+    body: &mut dyn FnMut(&mut StudioApp, &mut egui::Ui),
+) {
+    let has_scene = app.scene.is_some();
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| fold_title(ui, app, key, title));
+        if !is_open(app, key) {
+            return;
+        }
+        ui.add_enabled_ui(has_scene, |ui| body(app, ui));
+    });
+}
+
+/// A slider shown as whole numbers (value × `scale`), like -100..100.
+fn pct<'a>(v: &'a mut f32, lo: f32, hi: f32, text: &str, scale: f64) -> egui::Slider<'a> {
+    egui::Slider::new(v, lo..=hi)
+        .text(text)
+        .custom_formatter(move |x, _| format!("{:.0}", x * scale))
+        .custom_parser(move |t| t.trim().parse::<f64>().ok().map(|x| x / scale))
+}
+
+/// Point tone-curve editor: drag points, click to add, right-click to remove.
+fn curve_editor(ui: &mut egui::Ui, curve: &mut crate::develop::Curve, color: Color32) {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, w * 0.75), Sense::click_and_drag());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, CornerRadius::same(6), theme::BG);
+    let grid = Stroke::new(1.0, Color32::from_white_alpha(18));
+    for k in 1..4 {
+        let t = k as f32 / 4.0;
+        p.line_segment([Pos2::new(rect.left() + t * rect.width(), rect.top()), Pos2::new(rect.left() + t * rect.width(), rect.bottom())], grid);
+        p.line_segment([Pos2::new(rect.left(), rect.top() + t * rect.height()), Pos2::new(rect.right(), rect.top() + t * rect.height())], grid);
+    }
+    p.line_segment([rect.left_bottom(), rect.right_top()], Stroke::new(1.0, Color32::from_white_alpha(30)));
+    let to_screen = |q: [f32; 2]| Pos2::new(rect.left() + q[0] * rect.width(), rect.bottom() - q[1] * rect.height());
+    let to_curve = |s: Pos2| [((s.x - rect.left()) / rect.width()).clamp(0.0, 1.0), ((rect.bottom() - s.y) / rect.height()).clamp(0.0, 1.0)];
+
+    // Which point is being dragged lives in egui's memory between frames.
+    let drag_id = resp.id.with("drag_point");
+    let mut dragging: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+    let nearest = |pos: Pos2, c: &crate::develop::Curve| {
+        c.points()
+            .iter()
+            .enumerate()
+            .map(|(i, q)| (i, to_screen(*q).distance(pos)))
+            .filter(|(_, d)| *d < 12.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    };
+
+    if let Some(pos) = resp.interact_pointer_pos() {
+        if resp.drag_started() || resp.clicked() {
+            dragging = nearest(pos, curve);
+            if dragging.is_none() && (curve.n as usize) < crate::develop::MAX_POINTS {
+                // Add a point at the pointer.
+                let mut pts = curve.points().to_vec();
+                pts.push(to_curve(pos));
+                *curve = crate::develop::Curve::from_points(&pts);
+                dragging = nearest(pos, curve);
+            }
+        }
+        if resp.dragged() {
+            if let Some(i) = dragging {
+                let n = curve.n as usize;
+                let mut q = to_curve(pos);
+                // Ends stay at the left and right edges; others stay between neighbors.
+                if i == 0 {
+                    q[0] = 0.0;
+                } else if i == n - 1 {
+                    q[0] = 1.0;
+                } else {
+                    let lo = curve.pts[i - 1][0] + 0.01;
+                    let hi = curve.pts[i + 1][0] - 0.01;
+                    q[0] = q[0].clamp(lo, hi.max(lo));
+                }
+                curve.pts[i] = q;
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        dragging = None;
+    }
+    if resp.secondary_clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if let Some(i) = nearest(pos, curve) {
+                let n = curve.n as usize;
+                if i != 0 && i != n - 1 {
+                    let pts: Vec<[f32; 2]> = curve.points().iter().enumerate().filter(|(k, _)| *k != i).map(|(_, q)| *q).collect();
+                    *curve = crate::develop::Curve::from_points(&pts);
+                }
+            }
+        }
+    }
+    ui.data_mut(|d| match dragging {
+        Some(i) => {
+            d.insert_temp(drag_id, i);
+        }
+        None => d.remove::<usize>(drag_id),
+    });
+
+    // The curve and its points.
+    let line: Vec<Pos2> = (0..=64).map(|k| {
+        let x = k as f32 / 64.0;
+        to_screen([x, curve.eval(x)])
+    }).collect();
+    p.add(egui::Shape::line(line, Stroke::new(2.0, color)));
+    for q in curve.points() {
+        p.circle_filled(to_screen(*q), 4.5, color);
+        p.circle_stroke(to_screen(*q), 4.5, Stroke::new(1.0, theme::BG));
+    }
 }
 
 // ----- Crop ----------------------------------------------------------------
@@ -1441,4 +2043,73 @@ fn color_swatches(ui: &mut egui::Ui, current: &mut [u8; 3], palette: &[[u8; 3]])
             *current = c;
         }
     }
+}
+
+// ----- Film simulation -------------------------------------------------------
+
+/// Film styles grouped by kind, with a strength slider and "No film".
+pub fn film_card(app: &mut StudioApp, ui: &mut egui::Ui) {
+    let sims = crate::film::all();
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            fold_title(ui, app, "film", "Film Simulation");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(!app.look.is_neutral(), egui::Button::new("No film").small())
+                    .on_hover_text("Remove the film style and all Look changes")
+                    .clicked()
+                {
+                    app.look = crate::finish::Look::default();
+                    app.film_choice = None;
+                }
+            });
+        });
+        if !is_open(app, "film") {
+            return;
+        }
+        // Strength: re-applies the chosen style as it moves.
+        let r = with_reset!(
+            ui,
+            app.film_strength,
+            1.0,
+            egui::Slider::new(&mut app.film_strength, 0.0..=1.0)
+                .text("Strength")
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+        );
+        if r {
+            if let Some(i) = app.film_choice {
+                app.look = crate::film::at_strength(&sims[i].look, app.film_strength);
+            }
+        }
+        for group in crate::film::GROUPS {
+            let members: Vec<usize> = (0..sims.len()).filter(|&i| sims[i].group == group).collect();
+            if members.is_empty() {
+                continue;
+            }
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(group.to_uppercase()).size(11.0).strong().color(theme::TEXT_DIM));
+            let tiles: Vec<Tile> = members
+                .iter()
+                .map(|&i| Tile {
+                    key: format!("film:{}", sims[i].name),
+                    name: sims[i].name.to_string(),
+                    note: sims[i].note.to_string(),
+                    look: crate::film::at_strength(&sims[i].look, app.film_strength),
+                    thumb_look: sims[i].look,
+                    removable: false,
+                })
+                .collect();
+            if let Some(TileAction::Apply(t)) = tile_grid(app, ui, &tiles) {
+                let i = members[t];
+                app.film_choice = Some(i);
+                app.look = crate::film::at_strength(&sims[i].look, app.film_strength);
+                app.status = format!("Applied the {} film style.", sims[i].name);
+            }
+            if app.scene.is_none() {
+                break; // one "open a photo" note is enough
+            }
+        }
+    });
 }

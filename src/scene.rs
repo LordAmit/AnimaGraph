@@ -29,6 +29,14 @@ enum Step {
     Turn { clockwise: bool },
 }
 
+/// Edit settings kept per file (crop and rotation live on the scene itself).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Edits {
+    pub look: crate::finish::Look,
+    pub border: crate::border::Border,
+    pub caption: crate::caption::Caption,
+}
+
 static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub struct Scene {
@@ -40,6 +48,8 @@ pub struct Scene {
     pub aspect: crate::crop::Aspect,
     /// The crop was confirmed: the canvas shows only the kept part.
     pub crop_applied: bool,
+    /// This file's look, border and caption.
+    pub edits: Edits,
     /// The photo at its original resolution.
     pub full: RgbaImage,
     /// A smaller copy used for editing and previews.
@@ -68,6 +78,7 @@ impl Scene {
             crop: crate::crop::CropRect::FULL,
             aspect: crate::crop::Aspect::Free,
             crop_applied: false,
+            edits: Edits::default(),
             full,
             work,
             mask: vec![0.0; n],

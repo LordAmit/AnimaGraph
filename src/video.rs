@@ -21,6 +21,13 @@ pub struct VideoSource {
     /// The same frames at editing size.
     pub work: Vec<RgbaImage>,
     pub fps: f32,
+    /// Shot in Apple Log (iPhone "Log" video).
+    pub apple_log: bool,
+    /// For Apple Log clips, the frames as read (still log-encoded, flat),
+    /// kept so the conversion can be switched on and off.
+    pub log_frames: Option<std::sync::Arc<Vec<RgbaImage>>>,
+    /// The frames in use are converted from Apple Log to normal colours.
+    pub log_converted: bool,
 }
 
 impl VideoSource {
@@ -44,7 +51,48 @@ impl VideoSource {
             .iter()
             .map(|f| crate::scene::downscale(f, crate::scene::WORK_SIZE))
             .collect();
-        Ok(Self { frames, work, fps: fps.clamp(1.0, 60.0) })
+        Ok(Self { frames, work, fps: fps.clamp(1.0, 60.0), apple_log: false, log_frames: None, log_converted: false })
+    }
+
+    /// For an Apple Log clip as read, keep the log frames and use them
+    /// converted to normal colours (`convert`) or as they are.
+    pub fn with_log_choice(mut self, convert: bool) -> Self {
+        if !self.apple_log {
+            return self;
+        }
+        let log = std::sync::Arc::new(std::mem::take(&mut self.frames));
+        Self::from_log(log, self.fps, convert)
+    }
+
+    /// The same Apple Log clip with the conversion switched on or off.
+    pub fn log_switched(&self, convert: bool) -> Option<Self> {
+        let log = self.log_frames.clone()?;
+        Some(Self::from_log(log, self.fps, convert))
+    }
+
+    fn from_log(log: std::sync::Arc<Vec<RgbaImage>>, fps: f32, convert: bool) -> Self {
+        let frames: Vec<RgbaImage> = std::thread::scope(|s| {
+            let handles: Vec<_> = log
+                .chunks(log.len().div_ceil(8).max(1))
+                .map(|chunk| {
+                    s.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|f| {
+                                let mut f = f.clone();
+                                if convert {
+                                    crate::applelog::to_display(&mut f);
+                                }
+                                f
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        let work = frames.iter().map(|f| crate::scene::downscale(f, crate::scene::WORK_SIZE)).collect();
+        Self { frames, work, fps, apple_log: true, log_frames: Some(log), log_converted: convert }
     }
 
     pub fn seconds(&self) -> f32 {

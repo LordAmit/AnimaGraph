@@ -78,7 +78,13 @@ pub fn decode(path: &Path, seconds: f32, fps: u32) -> Result<VideoSource, String
         let mut next_time = 0.0f64;
         let mut first_pts: Option<f64> = None;
         let mut frames = Vec::new();
+        // Apple Log clips (iPhone "Log" video) are marked; whether they are
+        // converted to normal colours is chosen afterwards (VideoSource::with_log_choice).
+        let mut apple_log: Option<bool> = None;
         while let Some(sample) = output.copyNextSampleBuffer() {
+            if apple_log.is_none() {
+                apple_log = Some(sample.format_description().is_some_and(|d| is_apple_log(&d)));
+            }
             let pts = sample.presentation_time_stamp().seconds();
             let start = *first_pts.get_or_insert(pts);
             let rel = pts - start;
@@ -134,6 +140,18 @@ pub fn decode(path: &Path, seconds: f32, fps: u32) -> Result<VideoSource, String
                 .unwrap_or_else(|| "unknown reason".into());
             return Err(format!("Could not read the video: {why}"));
         }
-        VideoSource::new(frames, fps)
+        let mut v = VideoSource::new(frames, fps)?;
+        v.apple_log = apple_log == Some(true);
+        Ok(v)
+    }
+}
+
+/// Whether a video track is marked as Apple Log.
+unsafe fn is_apple_log(desc: &objc2_core_media::CMFormatDescription) -> bool {
+    use objc2_core_media::{kCMFormatDescriptionExtension_LogTransferFunction, kCMFormatDescriptionLogTransferFunction_AppleLog};
+    unsafe {
+        desc.extension(kCMFormatDescriptionExtension_LogTransferFunction)
+            .and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()))
+            .is_some_and(|s| s == kCMFormatDescriptionLogTransferFunction_AppleLog.to_string())
     }
 }

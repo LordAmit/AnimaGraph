@@ -126,6 +126,7 @@ impl Default for Look {
 }
 
 impl Look {
+    #[cfg(test)]
     pub fn is_neutral(&self) -> bool {
         let n = Look { grain_size: self.grain_size, grain_rough: self.grain_rough, ..Look::default() };
         self.without_unused_vignette() == n

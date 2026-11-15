@@ -239,6 +239,12 @@ pub struct StudioApp {
     pub arrow_len: f32,
     pub crop_before: Option<CropRect>,
     photo_look: Option<Look>,
+    /// The still at the chosen view quality, before the look.
+    still_base: Option<RgbaImage>,
+    /// The view quality `still_base` was made at.
+    still_base_size: Option<u32>,
+    /// The shown still was drawn quickly and is redrawn sharp when idle.
+    photo_fast: bool,
 
     pub speed: f32,
     pub loop_seconds: f32,
@@ -335,6 +341,9 @@ impl StudioApp {
             arrow_len: defaults::ARROW_LEN,
             crop_before: None,
             photo_look: None,
+            still_base: None,
+            still_base_size: None,
+            photo_fast: false,
             speed: 1.0,
             loop_seconds: 3.0,
             fps: 24,
@@ -345,7 +354,7 @@ impl StudioApp {
             play_pos: 0.0,
             task: None,
             last_deleted: Vec::new(),
-            export_format: Format::Gif,
+            export_format: Format::default_export(),
             export_size: 1024,
             ffmpeg: crate::export::video_available(),
             video_repeats: 3,
@@ -558,7 +567,10 @@ impl StudioApp {
                 self.open_queue.push(first);
                 return;
             }
-            self.start_decode(ctx, name, move || crate::video::decode_video(&first, seconds, fps));
+            let convert_log = self.prefs.convert_log;
+            self.start_decode(ctx, name, move || {
+                crate::video::decode_video(&first, seconds, fps).map(|v| v.with_log_choice(convert_log))
+            });
         } else if crate::video::is_gif(&first) {
             let path = first.clone();
             match crate::video::decode_gif(&path, seconds) {
@@ -667,11 +679,36 @@ impl StudioApp {
     pub fn set_video(&mut self, ctx: &egui::Context, name: String, video: VideoSource) {
         let secs = video.seconds();
         let n = video.frames.len();
+        let log = match (video.apple_log, video.log_converted) {
+            (true, true) => " Apple Log, converted to normal colours (switch off in the Video card).",
+            (true, false) => " Apple Log, shown as shot (flat).",
+            _ => "",
+        };
         self.set_scene(ctx, Scene::from_video(name.clone(), video));
         self.tool = Tool::Rect;
         self.status = format!(
-            "Loaded {name} ({n} frames, {secs:.1}s). Drag a box or paint the area to freeze, then press Make loop."
+            "Loaded {name} ({n} frames, {secs:.1}s).{log} Drag a box or paint the area to freeze, then press Make loop."
         );
+    }
+
+    /// Switch the Apple Log conversion on or off, for the open clip and for
+    /// clips opened later. Painted areas, trim and frozen frame are kept.
+    pub fn set_log_conversion(&mut self, ctx: &egui::Context, convert: bool) {
+        self.prefs.convert_log = convert;
+        let Some(scene) = &mut self.scene else { return };
+        let Some(video) = &scene.video else { return };
+        if !video.apple_log || video.log_converted == convert {
+            return;
+        }
+        let Some(switched) = video.log_switched(convert) else { return };
+        scene.video = Some(Arc::new(switched));
+        let still = scene.still_index;
+        self.set_still(ctx, still);
+        self.status = if convert {
+            "Apple Log converted to normal colours.".into()
+        } else {
+            "Apple Log shown as shot (flat, not converted).".into()
+        };
     }
 
     /// Choose the frozen frame of a video and show it on the canvas.
@@ -707,6 +744,26 @@ impl StudioApp {
         self.pick_tool(Tool::Crop);
     }
 
+    /// Frame of the current video shown by the live preview now.
+    pub fn live_index(&self) -> Option<usize> {
+        self.scene.as_ref()?.video.as_ref()?;
+        let [start, end] = self.trim_range();
+        let span = (end - start + 1) as f32;
+        let cycle = if self.bounce { (2.0 * span - 2.0).max(1.0) } else { span };
+        let phase = self.live_pos.rem_euclid(cycle);
+        let rel = if phase < span { phase } else { cycle - phase };
+        Some((start + rel as usize).min(end))
+    }
+
+    /// Move the live preview to a frame of the video (inside the trim range)
+    /// and pause there.
+    pub fn seek_live(&mut self, frame: usize) {
+        let [start, end] = self.trim_range();
+        self.live = true;
+        self.playing = false;
+        self.live_pos = (frame.clamp(start, end) - start) as f32;
+    }
+
     /// Trim range of the current video (start, end), always at least 2 frames.
     pub fn trim_range(&self) -> [usize; 2] {
         let Some(s) = &self.scene else { return [0, 0] };
@@ -725,18 +782,35 @@ impl StudioApp {
     pub fn refresh_photo_texture(&mut self, ctx: &egui::Context) {
         let shown = self.shown_look();
         let Some(scene) = &self.scene else { return };
-        if self.photo_tex.is_some() && self.photo_look == Some(shown) {
+        // The still is shown at the quality picked in View. Above the editing
+        // size it is drawn quickly at the editing size while a slider is
+        // dragged or a style is hovered, then again sharp once that stops.
+        let size = self.prefs.still_view;
+        let sharp = size != crate::scene::WORK_SIZE;
+        let fast = sharp && (self.look_preview.is_some() || ctx.input(|i| i.pointer.any_down()));
+        let rebuild_base = self.photo_look.is_none() || self.raw_tex.is_none() || self.still_base_size != Some(size);
+        if self.photo_tex.is_some() && !rebuild_base && self.photo_look == Some(shown) && !(self.photo_fast && !fast) {
             return;
         }
-        if self.photo_look.is_none() || self.raw_tex.is_none() {
-            let raw = &scene.work;
-            let c = egui::ColorImage::from_rgba_unmultiplied([raw.width() as usize, raw.height() as usize], raw.as_raw());
+        if rebuild_base {
+            let base = if sharp {
+                crate::scene::downscale(&scene.full, if size == 0 { u32::MAX } else { size })
+            } else {
+                scene.work.clone()
+            };
+            let c = egui::ColorImage::from_rgba_unmultiplied([base.width() as usize, base.height() as usize], base.as_raw());
             match &mut self.raw_tex {
                 Some(t) => t.set(c, TextureOptions::LINEAR),
                 None => self.raw_tex = Some(ctx.load_texture("original", c, TextureOptions::LINEAR)),
             }
+            self.still_base = Some(base);
+            self.still_base_size = Some(size);
         }
-        let mut img = scene.work.clone();
+        let Some(scene) = &self.scene else { return };
+        let mut img = match &self.still_base {
+            Some(b) if !fast => b.clone(),
+            _ => scene.work.clone(),
+        };
         crate::finish::apply_look(&mut img, &shown);
         let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
         match &mut self.photo_tex {
@@ -746,6 +820,12 @@ impl StudioApp {
         self.palette = crate::palette::dominant_colors(&img, 3);
         self.shown_still = Some(img);
         self.photo_look = Some(shown);
+        self.photo_fast = fast;
+    }
+
+    /// Pixel size of the still as shown now (for the View menu).
+    pub fn still_view_pixels(&self) -> Option<[u32; 2]> {
+        self.still_base.as_ref().map(|b| [b.width(), b.height()])
     }
 
     /// Advance and redraw the live preview of a video while editing.
@@ -762,9 +842,9 @@ impl StudioApp {
         if self.playing {
             self.live_pos = (self.live_pos + dt * video.fps * self.video_speed).rem_euclid(cycle);
         }
-        let phase = self.live_pos.rem_euclid(cycle);
-        let rel = if phase < span { phase } else { cycle - phase };
-        let idx = (start + rel as usize).min(end);
+        let idx = self.live_index().unwrap_or(start);
+        let Some(scene) = &self.scene else { return false };
+        let Some(video) = &scene.video else { return false };
         let mut frame = crate::video::live_frame(&video.work[idx], &video.work[scene.still_index], &scene.mask, self.freeze_painted);
         crate::finish::apply_look(&mut frame, &self.shown_look());
         let color = egui::ColorImage::from_rgba_unmultiplied([frame.width() as usize, frame.height() as usize], frame.as_raw());
@@ -1422,6 +1502,8 @@ impl StudioApp {
         self.stabilize = false;
         self.bounce = false;
         self.look = Look::default();
+        self.film_choice = None;
+        self.film_strength = 1.0;
         self.border = crate::border::Border::default();
         let font = self.caption.font.clone();
         self.caption = crate::caption::Caption { font, ..crate::caption::Caption::default() };

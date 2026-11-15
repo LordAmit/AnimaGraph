@@ -3,6 +3,7 @@
 //! motion, then render a seamless loop on this computer.
 
 mod app;
+mod applelog;
 mod automask;
 mod border;
 mod canvas;

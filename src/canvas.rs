@@ -331,6 +331,8 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
     }
     if app.view == View::Preview && app.active_clip.is_some() {
         playback_bar(app, ui, area);
+    } else if app.scene.as_ref().is_some_and(|s| s.is_video()) {
+        video_bar(app, ui, area);
     }
 }
 
@@ -904,12 +906,22 @@ fn playback_bar(app: &mut StudioApp, ui: &mut egui::Ui, area: Rect) {
     let n = clip.textures.len();
     let fps = clip.recipe.fps as f32;
     let label = format!("Loop {}", clip.number);
+    // Preview quality: the loop is animated at the editing size; export
+    // animates it again at the size picked in Export.
+    let (pw, ph) = clip.frames.first().map(|f| f.dimensions()).unwrap_or((0, 0));
+    let quality = format!("{} px · {} fps", pw.max(ph), clip.recipe.fps);
+    let quality_tip = format!(
+        "Preview quality: {pw} × {ph} px, {} frames a second.\n\
+         The preview is made small so it is quick. Export makes the loop again \
+         at the size chosen in Export (up to the full photo).",
+        clip.recipe.fps
+    );
     if app.playing {
         let dt = ui.input(|i| i.stable_dt).min(0.1);
         app.play_pos = (app.play_pos + dt * fps) % n as f32;
         ui.ctx().request_repaint();
     }
-    let width = 420.0;
+    let width = 490.0;
     let pos = Pos2::new(area.center().x - width / 2.0, area.bottom() - 62.0);
     egui::Area::new(egui::Id::unique("playback"))
         .fixed_pos(pos)
@@ -923,7 +935,7 @@ fn playback_bar(app: &mut StudioApp, ui: &mut egui::Ui, area: Rect) {
                         app.playing = !app.playing;
                     }
                     let mut frame = app.play_pos.floor();
-                    ui.spacing_mut().slider_width = width - 190.0;
+                    ui.spacing_mut().slider_width = width - 280.0;
                     let r = ui.add(egui::Slider::new(&mut frame, 0.0..=(n - 1) as f32).show_value(false).step_by(1.0));
                     if r.changed() {
                         app.play_pos = frame;
@@ -934,6 +946,84 @@ fn playback_bar(app: &mut StudioApp, ui: &mut egui::Ui, area: Rect) {
                             .color(theme::TEXT_DIM)
                             .size(12.0),
                     );
+                    ui.separator();
+                    ui.label(egui::RichText::new(quality).color(theme::TEXT_DIM).size(12.0))
+                        .on_hover_text(quality_tip);
+                });
+            });
+        });
+}
+
+/// Time bar for an imported video while editing: play / pause, a slider
+/// over the part in use (the trim range), the time, and a button that makes
+/// the frame shown the frozen frame (the one the still parts show).
+fn video_bar(app: &mut StudioApp, ui: &mut egui::Ui, area: Rect) {
+    let Some(scene) = &app.scene else { return };
+    let Some(video) = &scene.video else { return };
+    let fps = video.fps.max(1.0);
+    let total = video.frames.len();
+    let still = scene.still_index;
+    let [start, end] = app.trim_range();
+    let Some(idx) = app.live_index() else { return };
+    let width = 545.0;
+    let pos = Pos2::new(area.center().x - width / 2.0, area.bottom() - 62.0);
+    egui::Area::new(egui::Id::unique("video_time_bar"))
+        .fixed_pos(pos)
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            floating_frame().show(ui, |ui| {
+                ui.set_width(width - 12.0);
+                ui.horizontal(|ui| {
+                    let icon = if app.playing && app.live { Icon::Pause } else { Icon::Play };
+                    if tool_button(ui, icon, "Play / pause (Space)", false) {
+                        if app.live {
+                            app.playing = !app.playing;
+                        } else {
+                            app.live = true;
+                            app.playing = true;
+                        }
+                    }
+                    let mut frame = idx as f32;
+                    ui.spacing_mut().slider_width = 260.0;
+                    let r = ui
+                        .add(
+                            egui::Slider::new(&mut frame, start as f32..=end as f32)
+                                .show_value(false)
+                                .step_by(1.0),
+                        )
+                        .on_hover_text(
+                            "Drag to move through the video. The blue dot marks the frozen frame. \
+                             Set the part used with Trim in the Video card.",
+                        );
+                    // Mark where the frozen frame sits on the slider.
+                    if (start..=end).contains(&still) {
+                        let rail = r.rect.shrink2(Vec2::new(r.rect.height() / 2.0, 0.0));
+                        let x = rail.left() + rail.width() * (still - start) as f32 / (end - start).max(1) as f32;
+                        ui.painter().circle_filled(Pos2::new(x, r.rect.bottom() + 1.0), 2.5, theme::ACCENT);
+                    }
+                    if r.changed() {
+                        app.seek_live(frame.round() as usize);
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("{:.2}s / {:.2}s", idx as f32 / fps, total as f32 / fps))
+                            .color(theme::TEXT_DIM)
+                            .size(12.0),
+                    );
+                    ui.separator();
+                    let is_still = idx == still;
+                    if ui
+                        .add_enabled(!is_still, crate::icons::button(Icon::Snow, "Freeze this frame", theme::TEXT))
+                        .on_hover_text(
+                            "In a cinemagraph the still parts of the picture show one single frame of the video. \
+                             Click to use the frame you see now for them. The blue dot on the slider marks it.",
+                        )
+                        .on_disabled_hover_text("The still parts already show this frame (the blue dot).")
+                        .clicked()
+                    {
+                        let ctx = ui.ctx().clone();
+                        app.set_still(&ctx, idx);
+                        app.status = format!("The still parts now show the frame at {:.2}s.", idx as f32 / fps);
+                    }
                 });
             });
         });

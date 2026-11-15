@@ -54,7 +54,7 @@ pub const PANELS: [(&str, &str); 17] = [
 /// Small "back to default" button shown after a setting; grayed out when
 /// the setting already has its default value.
 fn reset_icon(ui: &mut egui::Ui, is_default: bool) -> bool {
-    let b = egui::Button::image(Icon::Undo.image(13.0, theme::TEXT_DIM))
+    let b = egui::Button::image(Icon::Reset.image(13.0, theme::TEXT_DIM))
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::NONE)
         .min_size(Vec2::splat(22.0));
@@ -107,9 +107,37 @@ pub fn top_bar(app: &mut StudioApp, ui: &mut egui::Ui) {
             {
                 app.start_export();
             }
-            if ui.add(icons::button(Icon::Folder, "Open photo or video", theme::TEXT).min_size(Vec2::new(0.0, 32.0))).clicked() {
+            if ui
+                .add(icons::button(Icon::Reset, "Reset", theme::TEXT).min_size(Vec2::new(0.0, 32.0)))
+                .on_hover_text(
+                    "Speed, lengths, look, film, border and other settings go back to their defaults. \
+                     Painted areas, arrows and crops are kept.",
+                )
+                .clicked()
+            {
+                app.reset_settings();
+            }
+            // Undo and redo (laid out right to left, so redo comes first).
+            let can_undo = app.scene.as_ref().is_some_and(|s| s.can_undo());
+            let can_redo = app.scene.as_ref().is_some_and(|s| s.can_redo());
+            let top_icon = |icon: Icon| {
+                egui::Button::image(icon.image(16.0, theme::TEXT)).min_size(Vec2::new(36.0, 32.0))
+            };
+            if ui
+                .add_enabled(can_redo, top_icon(Icon::Redo))
+                .on_hover_text("Redo (Cmd/Ctrl+Shift+Z)")
+                .clicked()
+            {
                 let ctx = ui.ctx().clone();
-                app.open_photo_dialog(&ctx);
+                app.redo(&ctx);
+            }
+            if ui
+                .add_enabled(can_undo, top_icon(Icon::Undo))
+                .on_hover_text("Undo (Cmd/Ctrl+Z): painting, arrows, pins, crop and rotation")
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                app.undo(&ctx);
             }
             ui.add_space(12.0);
             ui.scope(|ui| {
@@ -148,6 +176,8 @@ fn view_menu(app: &mut StudioApp, ui: &mut egui::Ui) {
         view_toggle(ui, app, "styles", "Styles");
         view_toggle(ui, app, "export", "Export");
         ui.separator();
+        still_view_choice(ui, app);
+        ui.separator();
         if ui.button("Show everything").clicked() {
             app.prefs.hidden.clear();
         }
@@ -162,6 +192,26 @@ fn view_menu(app: &mut StudioApp, ui: &mut egui::Ui) {
     });
 }
 
+/// How sharp the still photo looks on the canvas while editing. Exports
+/// always use the size chosen in Export.
+fn still_view_choice(ui: &mut egui::Ui, app: &mut StudioApp) {
+    ui.label(egui::RichText::new("Still photo quality").size(11.0).color(theme::TEXT_DIM));
+    for (size, label) in crate::settings::STILL_VIEW_CHOICES {
+        ui.radio_value(&mut app.prefs.still_view, size, label).on_hover_text(if size == crate::scene::WORK_SIZE {
+            "Quickest to update. Can look soft on a large screen."
+        } else {
+            "Sharper on screen. While you drag a slider or hover a style it updates at 720 px, \
+             then sharpens when you let go."
+        });
+    }
+    let shown = app.still_view_pixels().map(|[w, h]| format!("Shown now at {w} × {h} px. Exports use the Export size."));
+    ui.label(
+        egui::RichText::new(shown.unwrap_or_else(|| "Exports use the Export size.".into()))
+            .size(11.0)
+            .color(theme::TEXT_DIM),
+    );
+}
+
 // ----- Side panel ----------------------------------------------------------
 
 pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
@@ -173,7 +223,7 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
 
         // Animate: what moves, how, and the button that makes the loop.
         let (title, intro) = if is_video {
-            ("Freeze part of a video", "Select an area, choose whether it freezes or plays, then press Make loop.")
+            ("Freeze", "Select an area, choose whether it freezes or plays, then press Make loop.")
         } else {
             ("Animate", "Paint the area to animate, draw arrows in the direction of motion, then press Animate.")
         };
@@ -251,14 +301,6 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
             );
         }
 
-        ui.add_space(4.0);
-        if ui
-            .add(icons::button(Icon::Undo, "Reset all settings", theme::TEXT_DIM).fill(Color32::TRANSPARENT))
-            .on_hover_text("Speed, lengths, look, border and other settings go back to their defaults. Painted areas, arrows and crops are kept.")
-            .clicked()
-        {
-            app.reset_settings();
-        }
         ui.add_space(8.0);
     });
 }
@@ -850,6 +892,23 @@ pub fn video_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             }
         });
 
+        // Apple Log: convert to normal colours, or keep the flat log picture.
+        if video.apple_log {
+            let mut convert = video.log_converted;
+            if ui
+                .checkbox(&mut convert, "Convert Apple Log to normal colours")
+                .on_hover_text(
+                    "This clip was shot in Apple Log, which looks flat and grey as shot. \
+                     On: shown and saved in normal colours. Off: kept as shot, for your own grading \
+                     with Edit or a preset. Your choice is used for Log clips you open later too.",
+                )
+                .changed()
+            {
+                let ctx = ui.ctx().clone();
+                app.set_log_conversion(&ctx, convert);
+            }
+        }
+
         // Trim.
         ui.label(egui::RichText::new("Trim").strong());
         let r1 = ui.add(egui::Slider::new(&mut start, 0..=n - 2).text("Start").custom_formatter(move |v, _| format!("{:.2}s", v as f32 / fps)));
@@ -873,8 +932,8 @@ pub fn video_card(app: &mut StudioApp, ui: &mut egui::Ui) {
 
         // Still frame.
         let r = ui
-            .add(egui::Slider::new(&mut still, 0..=n - 1).text("Still frame").custom_formatter(move |v, _| format!("{:.2}s", v as f32 / fps)))
-            .on_hover_text("The frame shown in the frozen area");
+            .add(egui::Slider::new(&mut still, 0..=n - 1).text("Frozen frame").custom_formatter(move |v, _| format!("{:.2}s", v as f32 / fps)))
+            .on_hover_text("The single frame of the video that the still parts of the picture show");
         if r.changed() {
             let ctx = ui.ctx().clone();
             app.set_still(&ctx, still);
@@ -883,7 +942,7 @@ pub fn video_card(app: &mut StudioApp, ui: &mut egui::Ui) {
 
         with_reset!(ui, app.video_speed, defaults::VIDEO_SPEED, egui::Slider::new(&mut app.video_speed, 0.25..=2.0).text("Speed").suffix("×"));
         ui.checkbox(&mut app.stabilize, "Stabilize handheld clip")
-            .on_hover_text("Aligns each frame to the still frame and zooms in slightly to hide the edges. Applied when the loop is made.");
+            .on_hover_text("Aligns each frame to the frozen frame and zooms in slightly to hide the edges. Applied when the loop is made.");
 
         // Loop style.
         loop_style(app, ui);
@@ -937,14 +996,7 @@ fn loop_style(app: &mut StudioApp, ui: &mut egui::Ui) {
 pub fn look_card(app: &mut StudioApp, ui: &mut egui::Ui) {
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            fold_title(ui, app, "look", "Look");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!app.look.is_neutral(), egui::Button::new("Reset").small()).clicked() {
-                    app.look = crate::finish::Look::default();
-                }
-            });
-        });
+        fold_title(ui, app, "look", "Look");
         if !is_open(app, "look") {
             return;
         }
@@ -2047,24 +2099,13 @@ fn color_swatches(ui: &mut egui::Ui, current: &mut [u8; 3], palette: &[[u8; 3]])
 
 // ----- Film simulation -------------------------------------------------------
 
-/// Film styles grouped by kind, with a strength slider and "No film".
+/// Film styles grouped by kind, with a strength slider. Reset (top bar)
+/// removes the film style.
 pub fn film_card(app: &mut StudioApp, ui: &mut egui::Ui) {
     let sims = crate::film::all();
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            fold_title(ui, app, "film", "Film Simulation");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(!app.look.is_neutral(), egui::Button::new("No film").small())
-                    .on_hover_text("Remove the film style and all Look changes")
-                    .clicked()
-                {
-                    app.look = crate::finish::Look::default();
-                    app.film_choice = None;
-                }
-            });
-        });
+        fold_title(ui, app, "film", "Film Simulation");
         if !is_open(app, "film") {
             return;
         }

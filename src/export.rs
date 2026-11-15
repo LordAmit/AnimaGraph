@@ -19,6 +19,12 @@ pub enum Format {
 }
 
 impl Format {
+    /// The format chosen when the app starts: a HEIC still on macOS, where
+    /// the system can write it; elsewhere an animated GIF.
+    pub fn default_export() -> Self {
+        if cfg!(target_os = "macos") { Format::Heif } else { Format::Gif }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Format::Gif => "Animated GIF",

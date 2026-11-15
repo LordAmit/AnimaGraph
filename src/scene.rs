@@ -197,7 +197,15 @@ impl Scene {
         if let Some(v) = &self.video {
             let frames: Vec<RgbaImage> = v.frames.iter().map(turn).collect();
             let work: Vec<RgbaImage> = v.work.iter().map(turn).collect();
-            self.video = Some(std::sync::Arc::new(crate::video::VideoSource { frames, work, fps: v.fps }));
+            let log_frames = v.log_frames.as_ref().map(|l| std::sync::Arc::new(l.iter().map(turn).collect()));
+            self.video = Some(std::sync::Arc::new(crate::video::VideoSource {
+                frames,
+                work,
+                fps: v.fps,
+                apple_log: v.apple_log,
+                log_frames,
+                log_converted: v.log_converted,
+            }));
         }
         self.mask_version += 1;
     }

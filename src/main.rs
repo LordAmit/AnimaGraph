@@ -10,6 +10,8 @@ mod canvas;
 mod caption;
 mod crop;
 mod icons;
+mod layout;
+mod layout_view;
 #[cfg(target_os = "macos")]
 mod macvideo;
 #[cfg(target_os = "macos")]
@@ -28,6 +30,7 @@ mod raw;
 mod render;
 mod sample;
 mod scene;
+mod scope;
 mod settings;
 mod stabilize;
 mod straighten;

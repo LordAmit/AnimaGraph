@@ -31,12 +31,25 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
     // no confirmed crop), otherwise only the kept part.
     let [iw, ih] = scene.work_size();
     let crop_tool = app.view == View::Edit && app.tool == Tool::Crop;
-    // Holding \ shows the original for a moment.
+    // Holding \ shows the original (no colour edits) inside the crop;
+    // holding Shift+\ shows the original whole picture, without the crop.
     let typing = ui
         .ctx()
         .memory(|m| m.focused())
         .is_some_and(|id| egui::text_edit::TextEditState::load(ui.ctx(), id).is_some());
-    let hold_original = !typing && ui.input(|i| i.key_down(egui::Key::Backslash));
+    let (hold_cropped, hold_whole) = if typing {
+        (false, false)
+    } else {
+        ui.input(|i| {
+            let shift = i.modifiers.shift;
+            let backslash = i.key_down(egui::Key::Backslash);
+            let pipe = i.key_down(egui::Key::Pipe);
+            (backslash && !shift, pipe || (backslash && shift))
+        })
+    };
+    let hold_original = hold_cropped || hold_whole;
+    // The Original button and Shift+\ show the whole picture; \ keeps the crop.
+    let original_keeps_crop = hold_cropped;
     let compare = if crop_tool {
         Compare::Edited
     } else if hold_original {
@@ -48,7 +61,7 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
         (View::Preview, Some(i)) => app.clips.get(i).map(|c| c.recipe.crop),
         _ => None,
     };
-    let view_region = if crop_tool || !scene.crop_applied || compare == Compare::Original {
+    let view_region = if crop_tool || !scene.crop_applied || (compare == Compare::Original && !original_keeps_crop) {
         CropRect::FULL
     } else {
         showing_clip_crop.unwrap_or(scene.crop)
@@ -213,7 +226,8 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
         painter.galley(r.min + Vec2::new(7.0, 3.0), g, Color32::WHITE);
     }
     if compare == Compare::Original {
-        let g = painter.layout_no_wrap("ORIGINAL".into(), FontId::proportional(11.0), Color32::WHITE);
+        let text = if view_region.is_full() || !scene.crop_applied { "ORIGINAL" } else { "ORIGINAL · CROPPED" };
+        let g = painter.layout_no_wrap(text.into(), FontId::proportional(11.0), Color32::WHITE);
         let r = Align2::LEFT_TOP.anchor_size(img_rect.left_top() + Vec2::new(10.0, 10.0), g.size()).expand2(Vec2::new(7.0, 3.0));
         painter.rect_filled(r, CornerRadius::same(5), Color32::from_black_alpha(160));
         painter.galley(r.min + Vec2::new(7.0, 3.0), g, Color32::WHITE);
@@ -611,7 +625,7 @@ fn compare_switch(app: &mut StudioApp, ui: &mut egui::Ui, area: Rect) {
                     ui.spacing_mut().item_spacing = Vec2::splat(4.0);
                     for (mode, label, tip) in [
                         (Compare::Edited, "Edited", "Edited picture"),
-                        (Compare::Original, "Original", "Original photo without edits. Hold \\ to show it briefly."),
+                        (Compare::Original, "Original", "Original photo without edits, whole picture. Hold \\ to see the original inside your crop, or Shift+\\ to see the whole original."),
                         (Compare::Split, "Split", "Original on the left, edited on the right; drag on the picture to move the divider"),
                     ] {
                         let sel = app.compare == mode;
@@ -767,7 +781,7 @@ fn draw_crop_guide(painter: &egui::Painter, img_rect: Rect, crop: CropRect, hand
     }
 }
 
-fn draw_dot_grid(painter: &egui::Painter, rect: Rect) {
+pub(crate) fn draw_dot_grid(painter: &egui::Painter, rect: Rect) {
     painter.rect_filled(rect, CornerRadius::ZERO, theme::BG);
     let step = 24.0;
     let color = Color32::from_rgb(30, 30, 37);

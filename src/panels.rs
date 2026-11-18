@@ -31,7 +31,8 @@ fn is_open(app: &StudioApp, key: &str) -> bool {
 }
 
 /// Every panel the View menu can show or hide: (key, name).
-pub const PANELS: [(&str, &str); 17] = [
+pub const PANELS: [(&str, &str); 18] = [
+    ("scope", "Vectorscope"),
     ("region", "Moving region / selected area"),
     ("motion", "Motion"),
     ("loop", "Loop"),
@@ -53,7 +54,7 @@ pub const PANELS: [(&str, &str); 17] = [
 
 /// Small "back to default" button shown after a setting; grayed out when
 /// the setting already has its default value.
-fn reset_icon(ui: &mut egui::Ui, is_default: bool) -> bool {
+pub(crate) fn reset_icon(ui: &mut egui::Ui, is_default: bool) -> bool {
     let b = egui::Button::image(Icon::Reset.image(13.0, theme::TEXT_DIM))
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::NONE)
@@ -88,6 +89,33 @@ pub fn top_bar(app: &mut StudioApp, ui: &mut egui::Ui) {
             app.set_panel_visible("files", !files_on);
         }
         view_menu(app, ui);
+        // Layout: several finished photos on one picture.
+        let can_layout = app.layout.is_some() || app.files.len() >= 2;
+        let on = app.layout_open;
+        let layout_btn = icons::button(
+            Icon::Layout,
+            egui::RichText::new("Layout").size(13.5).color(if on { Color32::WHITE } else { theme::TEXT }),
+            if on { Color32::WHITE } else { theme::TEXT },
+        )
+        .fill(if on { theme::ACCENT } else { Color32::TRANSPARENT });
+        if ui
+            .add_enabled(can_layout, layout_btn)
+            .on_hover_text(if on {
+                "Back to editing single files (the layout is kept)"
+            } else {
+                "Place several finished photos on one picture"
+            })
+            .on_disabled_hover_text("Open at least two files to make a layout")
+            .clicked()
+        {
+            if on {
+                app.close_layout();
+            } else if app.layout.is_some() {
+                app.open_layout();
+            } else {
+                app.new_layout();
+            }
+        }
         ui.add_space(4.0);
         ui.add(Icon::Logo.image(26.0, Color32::WHITE));
         ui.label(egui::RichText::new("Animagraph").size(15.0).strong());
@@ -96,7 +124,16 @@ pub fn top_bar(app: &mut StudioApp, ui: &mut egui::Ui) {
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can_export = app.can_export();
+            // Fold the right-hand settings bar (mirror of the Files panel button).
+            let controls_on = app.panel_visible("controls");
+            let controls_btn =
+                egui::Button::image(Icon::SidebarRight.image(18.0, if controls_on { Color32::WHITE } else { theme::TEXT_DIM }))
+                    .fill(if controls_on { theme::ACCENT_SOFT } else { Color32::TRANSPARENT })
+                    .min_size(Vec2::splat(30.0));
+            if ui.add(controls_btn).on_hover_text("Show or hide the settings bar on the right").clicked() {
+                app.set_panel_visible("controls", !controls_on);
+            }
+            let can_export = if app.layout_open { app.layout.is_some() && !app.busy() } else { app.can_export() };
             let export = icons::button(Icon::Download, egui::RichText::new("Export").color(Color32::WHITE).strong(), Color32::WHITE)
                 .fill(if can_export { theme::ACCENT } else { theme::ACCENT_SOFT })
                 .min_size(Vec2::new(96.0, 32.0));
@@ -105,7 +142,11 @@ pub fn top_bar(app: &mut StudioApp, ui: &mut egui::Ui) {
                 .on_disabled_hover_text("Animate a loop first, or choose a still image format in Export")
                 .clicked()
             {
-                app.start_export();
+                if app.layout_open {
+                    app.export_layout();
+                } else {
+                    app.start_export();
+                }
             }
             if ui
                 .add(icons::button(Icon::Reset, "Reset", theme::TEXT).min_size(Vec2::new(0.0, 32.0)))
@@ -168,6 +209,7 @@ fn view_menu(app: &mut StudioApp, ui: &mut egui::Ui) {
         ui.set_min_width(230.0);
         view_toggle(ui, app, "files", "Files panel");
         view_toggle(ui, app, "results", "Results strip");
+        view_toggle(ui, app, "vectorscope", "Vectorscope");
         view_toggle(ui, app, "controls", "Settings bar (right)");
         ui.separator();
         ui.label(egui::RichText::new("Settings bar sections").size(11.0).color(theme::TEXT_DIM));
@@ -216,6 +258,18 @@ fn still_view_choice(ui: &mut egui::Ui, app: &mut StudioApp) {
 // ----- Side panel ----------------------------------------------------------
 
 pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
+    if app.layout_open {
+        crate::layout_view::side_panel(app, ui);
+        return;
+    }
+    // The vectorscope stays at the top while the drawers scroll.
+    if app.panel_visible("vectorscope") && app.scene.is_some() {
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(312.0));
+            vectorscope_card(app, ui);
+        });
+        ui.add_space(10.0);
+    }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 10.0;
         // Keep everything inside the bar's width.
@@ -232,18 +286,21 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                 "Edit",
                 "Adjust light, color, curves and effects. Applies to saved images, loops and videos.",
                 |app, ui| {
-                    let others = app.files.len().saturating_sub(1);
-                    let b = icons::button(Icon::Image, "Apply edits to all files", theme::TEXT);
+                    let n = app.apply_targets().len();
+                    let b = icons::button(Icon::Image, format!("Apply edits to {}", app.apply_target_words()), theme::TEXT);
                     if ui
-                        .add_enabled(others > 0, b)
+                        .add_enabled(n > 0, b)
                         .on_hover_text(
-                            "Copies this file's look, border and caption to the other open files. \
-                             Files opened later start without them. Crop, rotation and straightening are not copied.",
+                            "Copies this file's colour edits (light, colour, curves, effects, presets and film) to the \
+                             other open files, or only to the files selected in the Files panel. Framing is copied \
+                             with its own button in Framing.",
                         )
-                        .on_disabled_hover_text("Open more than one file to use this")
+                        .on_disabled_hover_text(
+                            "Open more than one file to use this. Cmd/Ctrl-click files in the Files panel to pick some.",
+                        )
                         .clicked()
                     {
-                        app.apply_edits_to_all();
+                        app.apply_edits_to_targets();
                     }
                     crate::panels::adjust_card(app, ui);
                 },
@@ -260,6 +317,29 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                 "Framing",
                 "Rotate, straighten and crop, then add a border or caption.",
                 |app, ui| {
+                    if app.scene.is_none() {
+                        ui.label(
+                            egui::RichText::new("Open a photo or video to use these settings.")
+                                .size(12.0)
+                                .color(theme::TEXT_DIM),
+                        );
+                    }
+                    let n = app.apply_targets().len();
+                    let b = icons::button(Icon::Crop, format!("Apply framing to {}", app.apply_target_words()), theme::TEXT);
+                    if ui
+                        .add_enabled(n > 0, b)
+                        .on_hover_text(
+                            "Copies this file's crop, straightening, border and caption to the other open files, or \
+                             only to the files selected in the Files panel. Quarter turns are not copied. A crop with \
+                             a fixed shape keeps that shape on pictures of another size.",
+                        )
+                        .on_disabled_hover_text(
+                            "Open more than one file to use this. Cmd/Ctrl-click files in the Files panel to pick some.",
+                        )
+                        .clicked()
+                    {
+                        app.apply_framing_to_targets();
+                    }
                     crate::panels::crop_card(app, ui);
                     crate::panels::border_card(app, ui);
                     crate::panels::caption_card(app, ui);
@@ -317,6 +397,87 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
         }
 
         ui.add_space(8.0);
+    });
+}
+
+/// Vectorscope of the picture on the canvas: hue by angle, saturation by
+/// distance from the centre, with the 75% colour targets and the skin line.
+fn vectorscope_card(app: &mut StudioApp, ui: &mut egui::Ui) {
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            fold_title(ui, app, "scope", "Vectorscope");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                for z in [2.0f32, 1.0] {
+                    let sel = app.scope_zoom == z;
+                    if ui
+                        .selectable_label(sel, egui::RichText::new(format!("{z:.0}×")).size(12.0))
+                        .on_hover_text(if z > 1.0 {
+                            "Enlarge the middle, for pictures with soft colours"
+                        } else {
+                            "Whole range: the circle's edge is full saturation"
+                        })
+                        .clicked()
+                    {
+                        app.scope_zoom = z;
+                    }
+                }
+            });
+        });
+        if !is_open(app, "scope") {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        app.refresh_scope(&ctx);
+        let side = ui.available_width().min(200.0);
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), side), Sense::hover());
+        let rect = Rect::from_center_size(rect.center(), Vec2::splat(side));
+        let painter = ui.painter_at(rect.expand(2.0));
+        let to_screen = |p: [f32; 2]| {
+            let s = side / crate::scope::SIZE as f32;
+            rect.min + Vec2::new(p[0] * s, p[1] * s)
+        };
+        let zoom = app.scope_zoom;
+        let center = rect.center();
+        let radius = side / 2.0 - 4.0 * side / crate::scope::SIZE as f32;
+        // Graticule.
+        painter.circle_filled(center, radius, Color32::from_rgb(14, 14, 18));
+        painter.circle_stroke(center, radius, Stroke::new(1.0, Color32::from_white_alpha(50)));
+        painter.circle_stroke(center, radius * 0.5, Stroke::new(1.0, Color32::from_white_alpha(22)));
+        let faint = Stroke::new(1.0, Color32::from_white_alpha(22));
+        painter.line_segment([center - Vec2::new(radius, 0.0), center + Vec2::new(radius, 0.0)], faint);
+        painter.line_segment([center - Vec2::new(0.0, radius), center + Vec2::new(0.0, radius)], faint);
+        let [sx, sy] = crate::scope::skin_direction();
+        painter.line_segment(
+            [center, center + Vec2::new(sx, -sy) * radius],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(230, 170, 130, 110)),
+        );
+        // Trace.
+        if let Some(t) = &app.scope_tex {
+            painter.image(t.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        // Colour targets (75%).
+        for (label, c) in crate::scope::targets() {
+            let p = to_screen(crate::scope::to_scope(c, zoom));
+            if !rect.contains(p) || (p - center).length() > radius + 1.0 {
+                continue;
+            }
+            let box_r = Rect::from_center_size(p, Vec2::splat(9.0));
+            painter.rect_stroke(box_r, CornerRadius::ZERO, Stroke::new(1.0, Color32::from_white_alpha(120)), egui::StrokeKind::Middle);
+            let dir = (p - center).normalized();
+            painter.text(
+                p + dir * 12.0,
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(9.5),
+                Color32::from_white_alpha(150),
+            );
+        }
+        resp.on_hover_text(
+            "Each dot is a colour in the picture: the angle is the hue, the distance from the centre \
+             the saturation. Boxes mark strong red, magenta, blue, cyan, green and yellow; the orange \
+             line is where skin tones fall. Grey and white sit in the middle.",
+        );
     });
 }
 
@@ -1602,8 +1763,7 @@ pub fn crop_card(app: &mut StudioApp, ui: &mut egui::Ui) {
 /// Straighten: turn by any angle, -45° to 45°. Dragging redraws a quick
 /// preview with a grid; letting go finishes it as one undo step.
 fn straighten_row(app: &mut StudioApp, ui: &mut egui::Ui) {
-    let Some(sc) = &app.scene else { return };
-    let current = sc.angle;
+    let current = app.scene.as_ref().map_or(0.0, |s| s.angle);
     let mut deg = current;
     let ctx = ui.ctx().clone();
     ui.horizontal(|ui| {
@@ -1631,17 +1791,19 @@ fn straighten_row(app: &mut StudioApp, ui: &mut egui::Ui) {
 
 /// Crop and rotate share one card: rotate buttons on top, then crop.
 fn rotate_row_card(app: &mut StudioApp, ui: &mut egui::Ui) {
-    let Some(sc) = &app.scene else { return };
-    let (iw, ih) = (sc.full.width(), sc.full.height());
-    let crop = sc.crop;
-    let aspect = sc.aspect;
+    // Shown (greyed out) even with no file open.
+    let has_file = app.scene.is_some();
+    let (iw, ih, crop, aspect) = match &app.scene {
+        Some(sc) => (sc.full.width(), sc.full.height(), sc.crop, sc.aspect),
+        None => (0, 0, crate::crop::CropRect::FULL, crate::crop::Aspect::Free),
+    };
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             fold_title(ui, app, "crop", "Rotate, straighten & crop");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add_enabled(!crop.is_full(), egui::Button::new("Reset crop").small())
+                    .add_enabled(has_file && !crop.is_full(), egui::Button::new("Reset crop").small())
                     .on_hover_text("Keep the whole picture")
                     .clicked()
                 {
@@ -1658,6 +1820,9 @@ fn rotate_row_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         });
         if !is_open(app, "crop") {
             return;
+        }
+        if !has_file {
+            ui.disable();
         }
         ui.horizontal(|ui| {
             let busy = app.busy();
@@ -1714,7 +1879,9 @@ fn rotate_row_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             }
         });
         let [_, _, w, h] = crop.pixels(iw, ih);
-        let text = if crop.is_full() {
+        let text = if !has_file {
+            "No file open".to_string()
+        } else if crop.is_full() {
             format!("Whole picture · {iw} × {ih} px")
         } else {
             format!("{w} × {h} px of {iw} × {ih}")
@@ -1732,19 +1899,21 @@ fn rotate_row_card(app: &mut StudioApp, ui: &mut egui::Ui) {
 
 /// Border around the output: on/off, thickness, color and shape.
 pub fn border_card(app: &mut StudioApp, ui: &mut egui::Ui) {
-    if app.scene.is_none() {
-        return;
-    }
+    // Shown (greyed out) even with no file open.
+    let has_file = app.scene.is_some();
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             fold_title(ui, app, "border", "Border");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut app.border.enabled, "Add border");
+                ui.add_enabled(has_file, egui::Checkbox::new(&mut app.border.enabled, "Add border"));
             });
         });
         if !is_open(app, "border") {
             return;
+        }
+        if !has_file {
+            ui.disable();
         }
         let b = &mut app.border;
         ui.add_enabled_ui(b.enabled, |ui| {
@@ -1907,19 +2076,21 @@ pub fn ratio_text(w: f32, h: f32) -> String {
 
 /// Caption text, font (built-in, added or installed), size, color, place.
 pub fn caption_card(app: &mut StudioApp, ui: &mut egui::Ui) {
-    if app.scene.is_none() {
-        return;
-    }
+    // Shown (greyed out) even with no file open.
+    let has_file = app.scene.is_some();
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             fold_title(ui, app, "caption", "Caption");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut app.caption.enabled, "Add caption");
+                ui.add_enabled(has_file, egui::Checkbox::new(&mut app.caption.enabled, "Add caption"));
             });
         });
         if !is_open(app, "caption") {
             return;
+        }
+        if !has_file {
+            ui.disable();
         }
         let enabled = app.caption.enabled;
         ui.add_enabled_ui(enabled, |ui| {
@@ -2222,7 +2393,7 @@ fn eyedropper_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
 }
 
 /// Five color swatches: white, the photo's three main colors, black.
-fn color_swatches(ui: &mut egui::Ui, current: &mut [u8; 3], palette: &[[u8; 3]]) {
+pub(crate) fn color_swatches(ui: &mut egui::Ui, current: &mut [u8; 3], palette: &[[u8; 3]]) {
     ui.spacing_mut().item_spacing.x = 6.0;
     let mut swatches: Vec<([u8; 3], String)> = vec![([255, 255, 255], "White".into())];
     for i in 0..3 {

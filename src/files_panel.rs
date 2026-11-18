@@ -42,6 +42,7 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
 
     let mut select = None;
     let mut remove = None;
+    let mods = ui.input(|i| i.modifiers);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .max_height(ui.available_height() - 40.0)
@@ -62,7 +63,37 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
     if let Some(i) = remove {
         app.remove_file(&ctx, i);
     } else if let Some(i) = select {
-        app.select_file(&ctx, i);
+        if mods.command {
+            // Cmd/Ctrl-click: add or take away one file from the selection.
+            if Some(i) != app.active_file && !app.selected_files.remove(&i) {
+                app.selected_files.insert(i);
+            }
+            app.select_anchor = Some(i);
+        } else if mods.shift {
+            // Shift-click: select every file between the last pick and this one.
+            let from = app.select_anchor.or(app.active_file).unwrap_or(i);
+            let (a, b) = (from.min(i), from.max(i));
+            for k in a..=b {
+                if Some(k) != app.active_file {
+                    app.selected_files.insert(k);
+                }
+            }
+        } else if app.layout_open {
+            // In the layout: put the file in the selected box.
+            match app.layout_cell {
+                Some(cell) => app.place_in_layout(cell, i),
+                None => {
+                    app.status = "Select a box in the layout first, or drag the file onto a box.".into();
+                }
+            }
+        } else {
+            app.selected_files.clear();
+            app.select_anchor = Some(i);
+            app.select_file(&ctx, i);
+        }
+    }
+    if !app.selected_files.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.selected_files.clear();
     }
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -75,6 +106,40 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
         {
             app.remove_all_files();
         }
+        // Layout of several files.
+        if app.files.len() >= 2 && !app.layout_open {
+            ui.horizontal(|ui| {
+                let n = app.layout_candidates().len();
+                let words = if app.selected_files.is_empty() { format!("Lay out all {n} files") } else { format!("Lay out {n} files") };
+                if ui
+                    .add(crate::icons::button(Icon::Image, egui::RichText::new(words).size(12.0), theme::TEXT))
+                    .on_hover_text(
+                        "Place finished photos together on one picture. Uses the open file and the selected \
+                         ones (Cmd/Ctrl-click), or all files when none is selected.",
+                    )
+                    .clicked()
+                {
+                    app.new_layout();
+                }
+                if app.layout.is_some() && ui.small_button("Open layout").on_hover_text("Back to the layout you made").clicked() {
+                    app.open_layout();
+                }
+            });
+        }
+        // Above Remove all: how many files are picked for Apply.
+        if !app.selected_files.is_empty() {
+            ui.horizontal(|ui| {
+                let n = app.selected_files.len();
+                ui.label(
+                    egui::RichText::new(format!("{n} selected for Apply"))
+                        .size(12.0)
+                        .color(theme::ACCENT),
+                );
+                if ui.small_button("Clear").on_hover_text("Unselect (Esc)").clicked() {
+                    app.selected_files.clear();
+                }
+            });
+        }
     });
 }
 
@@ -82,12 +147,24 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
 /// Returns (row clicked, remove clicked).
 fn file_row(app: &StudioApp, ui: &mut egui::Ui, i: usize, active: bool) -> (bool, bool) {
     let entry = &app.files[i];
+    let picked = app.selected_files.contains(&i);
     let width = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 62.0), Sense::click());
+    // In the layout, files can also be dragged onto a box.
+    let sense = if app.layout_open { Sense::click_and_drag() } else { Sense::click() };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 62.0), sense);
+    if app.layout_open && resp.drag_started() {
+        egui::DragAndDrop::set_payload(ui.ctx(), crate::layout_view::FileDrag(i));
+    }
+    let resp = resp.on_hover_text(
+        "Click to open. Cmd-click (Ctrl-click) to select several files, Shift-click for a range; \
+         Apply edits / Apply framing then copy only to the selected files.",
+    );
     let hovered = resp.hovered();
     let painter = ui.painter();
     let fill = if active {
         theme::ACCENT_SOFT
+    } else if picked {
+        Color32::from_rgb(30, 40, 62)
     } else if hovered {
         Color32::from_rgb(36, 36, 45)
     } else {
@@ -97,7 +174,7 @@ fn file_row(app: &StudioApp, ui: &mut egui::Ui, i: usize, active: bool) -> (bool
     painter.rect_stroke(
         rect,
         CornerRadius::same(10),
-        Stroke::new(1.0, if active { theme::ACCENT } else { theme::BORDER }),
+        Stroke::new(if picked { 1.5 } else { 1.0 }, if active || picked { theme::ACCENT } else { theme::BORDER }),
         egui::StrokeKind::Inside,
     );
 
@@ -114,6 +191,13 @@ fn file_row(app: &StudioApp, ui: &mut egui::Ui, i: usize, active: bool) -> (bool
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
         Color32::WHITE,
     );
+    if picked {
+        // Check mark on the thumbnail of a selected file.
+        let c = thumb_box.left_top() + Vec2::new(9.0, 9.0);
+        painter.circle_filled(c, 7.5, theme::ACCENT);
+        painter.line_segment([c + Vec2::new(-3.5, 0.0), c + Vec2::new(-1.0, 2.5)], Stroke::new(1.6, Color32::WHITE));
+        painter.line_segment([c + Vec2::new(-1.0, 2.5), c + Vec2::new(3.5, -2.5)], Stroke::new(1.6, Color32::WHITE));
+    }
     if entry.is_video {
         let badge = Rect::from_min_size(thumb_box.left_bottom() + Vec2::new(3.0, -17.0), Vec2::splat(14.0));
         painter.rect_filled(badge.expand(1.0), CornerRadius::same(3), Color32::from_black_alpha(170));

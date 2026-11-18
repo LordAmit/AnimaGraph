@@ -153,6 +153,11 @@ pub struct StudioApp {
     pub scene: Option<Scene>,
     pub files: Vec<FileEntry>,
     pub active_file: Option<usize>,
+    /// Files picked with Cmd/Ctrl-click or Shift-click in the Files panel,
+    /// for "Apply … to selected files". The current file is never in it.
+    pub selected_files: std::collections::BTreeSet<usize>,
+    /// Where the last Cmd/Ctrl-click was, for Shift-click ranges.
+    pub select_anchor: Option<usize>,
     /// Interface choices kept between sessions.
     pub prefs: crate::settings::Prefs,
     prefs_saved: crate::settings::Prefs,
@@ -247,6 +252,26 @@ pub struct StudioApp {
     angle_from: Option<f32>,
     /// The straighten slider is being dragged: the canvas shows a grid.
     pub straightening: bool,
+    /// The layout of several files (one per session), whether the canvas
+    /// shows it, each file's finished picture for its preview, the preview
+    /// texture and what it was drawn from, the selected box, and how it is
+    /// saved.
+    pub layout: Option<crate::layout::Layout>,
+    pub layout_open: bool,
+    pub layout_photos: std::collections::HashMap<u64, RgbaImage>,
+    pub layout_tex: Option<TextureHandle>,
+    layout_drawn: Option<crate::layout::Layout>,
+    pub layout_cell: Option<usize>,
+    pub layout_drag: Option<usize>,
+    /// The dragged box as it was when the drag started (put back while the
+    /// photo is dragged over another box).
+    pub layout_drag_saved: Option<crate::layout::Cell>,
+    pub layout_size: u32,
+    pub layout_format: Format,
+    /// Vectorscope trace, what it was drawn from, and its zoom (1 or 2).
+    pub scope_tex: Option<TextureHandle>,
+    pub scope_key: u64,
+    pub scope_zoom: f32,
     /// The still at the chosen view quality, before the look.
     still_base: Option<RgbaImage>,
     /// The view quality `still_base` was made at.
@@ -288,6 +313,8 @@ impl StudioApp {
         let mut app = Self {
             scene: None,
             files: Vec::new(),
+            selected_files: std::collections::BTreeSet::new(),
+            select_anchor: None,
             active_file: None,
             prefs: crate::settings::Prefs::default(),
             prefs_saved: crate::settings::Prefs::default(),
@@ -353,6 +380,19 @@ impl StudioApp {
             look_committed: None,
             angle_from: None,
             straightening: false,
+            layout: None,
+            layout_open: false,
+            layout_photos: std::collections::HashMap::new(),
+            layout_tex: None,
+            layout_drawn: None,
+            layout_cell: None,
+            layout_drag: None,
+            layout_drag_saved: None,
+            layout_size: 3000,
+            layout_format: if Format::default_export().is_still() { Format::default_export() } else { Format::Png },
+            scope_tex: None,
+            scope_key: 0,
+            scope_zoom: 1.0,
             still_base: None,
             still_base_size: None,
             photo_fast: false,
@@ -441,6 +481,7 @@ impl StudioApp {
         if self.active_file == Some(index) || index >= self.files.len() {
             return;
         }
+        self.selected_files.remove(&index);
         self.stash_active();
         if let Some(scene) = self.files[index].scene.take() {
             self.active_file = Some(index);
@@ -454,6 +495,8 @@ impl StudioApp {
         if index >= self.files.len() {
             return;
         }
+        self.selected_files.clear();
+        self.select_anchor = None;
         let name = self.files[index].name.clone();
         let was_active = self.active_file == Some(index);
         if was_active {
@@ -483,6 +526,8 @@ impl StudioApp {
     }
 
     pub fn remove_all_files(&mut self) {
+        self.selected_files.clear();
+        self.select_anchor = None;
         self.files.clear();
         self.active_file = None;
         self.scene = None;
@@ -502,19 +547,74 @@ impl StudioApp {
         }
     }
 
-    /// Copy the current look, border and caption to every open file.
-    /// Files opened later start without them.
-    pub fn apply_edits_to_all(&mut self) {
-        let edits = crate::scene::Edits { look: self.look, border: self.border, caption: self.caption.clone() };
-        let mut n = 0;
-        for f in self.files.iter_mut() {
-            if let Some(s) = &mut f.scene {
-                s.edits = edits.clone();
-                n += 1;
+    /// Files that "Apply … to" buttons copy to: the selected files, or
+    /// every other open file when none is selected. Never the current file.
+    pub fn apply_targets(&self) -> Vec<usize> {
+        let others = (0..self.files.len()).filter(|&i| Some(i) != self.active_file && self.files[i].scene.is_some());
+        if self.selected_files.is_empty() {
+            others.collect()
+        } else {
+            others.filter(|i| self.selected_files.contains(i)).collect()
+        }
+    }
+
+    /// "all files" or "3 selected files", for button labels.
+    pub fn apply_target_words(&self) -> String {
+        if self.selected_files.is_empty() {
+            "all files".into()
+        } else {
+            let n = self.apply_targets().len();
+            format!("{n} selected file{}", if n == 1 { "" } else { "s" })
+        }
+    }
+
+    /// Copy the current file's colour edits (Edit drawer: light, colour,
+    /// curves, presets, film) to the target files.
+    pub fn apply_edits_to_targets(&mut self) {
+        let look = self.look;
+        let targets = self.apply_targets();
+        for &i in &targets {
+            if let Some(s) = &mut self.files[i].scene {
+                s.edits.look = look;
             }
         }
         self.save_edits_to_scene();
-        self.status = format!("Applied this file's look, border and caption to {n} other file{}.", if n == 1 { "" } else { "s" });
+        let n = targets.len();
+        self.status = format!("Applied this file's colour edits to {n} other file{}.", if n == 1 { "" } else { "s" });
+    }
+
+    /// Copy the current file's framing (crop, straighten, border, caption)
+    /// to the target files. Quarter turns are not copied (each file keeps
+    /// its own way up). A crop with a fixed shape keeps that shape on
+    /// pictures of another size.
+    pub fn apply_framing_to_targets(&mut self) {
+        self.save_edits_to_scene();
+        let Some(src) = &self.scene else { return };
+        let (crop, aspect, crop_applied, angle) = (src.crop, src.aspect, src.crop_applied, src.angle);
+        let src_size = (src.full.width(), src.full.height());
+        let (border, caption) = (self.border, self.caption.clone());
+        let targets = self.apply_targets();
+        for &i in &targets {
+            let entry = &mut self.files[i];
+            let Some(s) = &mut entry.scene else { continue };
+            s.edits.border = border;
+            s.edits.caption = caption.clone();
+            let (w, h) = (s.full.width(), s.full.height());
+            s.crop = if (w, h) == src_size { crop } else { crop.with_aspect(aspect, w, h) };
+            s.aspect = aspect;
+            s.crop_applied = crop_applied && !s.crop.is_full();
+            if (s.angle - angle).abs() > 1e-4 {
+                s.set_angle(angle, false);
+                let thumb = crate::scene::downscale(&s.work, 160);
+                let c = egui::ColorImage::from_rgba_unmultiplied([thumb.width() as usize, thumb.height() as usize], thumb.as_raw());
+                entry.thumb.set(c, TextureOptions::LINEAR);
+            }
+        }
+        let n = targets.len();
+        self.status = format!(
+            "Applied this file's crop, straightening, border and caption to {n} other file{}.",
+            if n == 1 { "" } else { "s" }
+        );
     }
 
     fn show_scene(&mut self, _ctx: &egui::Context, scene: Scene) {
@@ -906,6 +1006,213 @@ impl StudioApp {
         }
         self.refresh_thumbnail();
         self.status = if angle == 0.0 { "Straighten off.".into() } else { format!("Straightened {angle:+.1}°.") };
+    }
+
+    /// The picture the canvas shows now, for the vectorscope: the playing
+    /// loop's frame in Preview, otherwise the edited still.
+    pub fn scope_source(&self) -> Option<&RgbaImage> {
+        if self.view == View::Preview && self.look_preview.is_none() {
+            if let Some(clip) = self.active_clip.and_then(|i| self.clips.get(i)) {
+                let n = clip.frames.len();
+                if n > 0 {
+                    return clip.frames.get((self.play_pos as usize).min(n - 1));
+                }
+            }
+        }
+        self.shown_still.as_ref()
+    }
+
+    /// Redraw the vectorscope when the shown picture or the zoom changed.
+    pub fn refresh_scope(&mut self, ctx: &egui::Context) {
+        use std::hash::{Hash, Hasher};
+        let Some(img) = self.scope_source() else {
+            self.scope_tex = None;
+            self.scope_key = 0;
+            return;
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (img.as_raw().as_ptr() as usize, img.width(), img.height(), self.scope_zoom.to_bits()).hash(&mut h);
+        // A few pixels too, in case a new picture reuses the same memory.
+        let raw = img.as_raw();
+        for k in 0..16 {
+            raw.get(k * raw.len() / 16).hash(&mut h);
+        }
+        let key = h.finish();
+        if key == self.scope_key && self.scope_tex.is_some() {
+            return;
+        }
+        let trace = crate::scope::trace(img, self.scope_zoom);
+        self.scope_key = key;
+        match &mut self.scope_tex {
+            Some(t) => t.set(trace, TextureOptions::NEAREST),
+            None => self.scope_tex = Some(ctx.load_texture("vectorscope", trace, TextureOptions::NEAREST)),
+        }
+    }
+
+    // ----- Layout -------------------------------------------------------
+
+    /// A file's scene and its edits (the current file's edits live in the app).
+    fn scene_and_edits(&self, id: u64) -> Option<(&Scene, crate::scene::Edits)> {
+        if let Some(s) = self.scene.as_ref().filter(|s| s.id == id) {
+            return Some((s, crate::scene::Edits { look: self.look, border: self.border, caption: self.caption.clone() }));
+        }
+        self.files.iter().filter_map(|f| f.scene.as_ref()).find(|s| s.id == id).map(|s| (s, s.edits.clone()))
+    }
+
+    /// Scene ids for a new layout: the current file and the selected ones,
+    /// or every file when none is selected, in Files panel order.
+    pub fn layout_candidates(&self) -> Vec<u64> {
+        let id_at = |i: usize| {
+            if Some(i) == self.active_file { self.scene.as_ref().map(|s| s.id) } else { self.files[i].scene.as_ref().map(|s| s.id) }
+        };
+        (0..self.files.len())
+            .filter(|&i| self.selected_files.is_empty() || self.selected_files.contains(&i) || Some(i) == self.active_file)
+            .filter_map(id_at)
+            .collect()
+    }
+
+    /// Start a layout from the current and selected files (or all files).
+    pub fn new_layout(&mut self) {
+        let ids = self.layout_candidates();
+        if ids.len() < 2 {
+            self.status = "Open at least two files to make a layout.".into();
+            return;
+        }
+        self.layout = Some(crate::layout::Layout::new(&ids));
+        self.layout_cell = None;
+        self.open_layout();
+    }
+
+    /// Show the layout, with every file's latest edits.
+    pub fn open_layout(&mut self) {
+        if self.layout.is_none() {
+            return;
+        }
+        self.save_edits_to_scene();
+        self.layout_photos.clear();
+        self.layout_drawn = None;
+        self.layout_open = true;
+        self.refresh_layout_photos();
+        self.status = "Layout: drag a photo to move it, onto another box to swap, or drag a file from the left into a box.".into();
+    }
+
+    pub fn close_layout(&mut self) {
+        self.layout_open = false;
+        self.layout_drag = None;
+        self.status = match &self.scene {
+            Some(s) => format!("Editing {}. The layout is kept: press Layout to go back to it.", s.name),
+            None => "The layout is kept: press Layout to go back to it.".into(),
+        };
+    }
+
+    /// Size of the finished pictures used for the layout preview.
+    const LAYOUT_PREVIEW: u32 = 1400;
+
+    /// Make the finished picture (colour edits, crop, caption, border) of
+    /// each file in the layout that does not have one yet.
+    pub fn refresh_layout_photos(&mut self) {
+        let Some(layout) = &self.layout else { return };
+        let ids: Vec<u64> = layout.cells.iter().filter_map(|c| c.source).chain(layout.files.iter().copied()).collect();
+        for id in ids {
+            if self.layout_photos.contains_key(&id) {
+                continue;
+            }
+            if let Some((scene, edits)) = self.scene_and_edits(id) {
+                let img = framed_still(&scene.full, scene.crop, &edits, Self::LAYOUT_PREVIEW);
+                self.layout_photos.insert(id, img);
+            }
+        }
+    }
+
+    /// Swap the photos of two boxes; both fill their new boxes, centered.
+    pub fn swap_layout_cells(&mut self, a: usize, b: usize) {
+        let Some(l) = &mut self.layout else { return };
+        if a == b || a >= l.cells.len() || b >= l.cells.len() {
+            return;
+        }
+        let (sa, sb) = (l.cells[a].source, l.cells[b].source);
+        l.cells[a] = crate::layout::Cell::new(sb);
+        l.cells[b] = crate::layout::Cell::new(sa);
+        self.layout_cell = Some(b);
+    }
+
+    /// Put a file in a box of the layout.
+    pub fn place_in_layout(&mut self, cell: usize, file_index: usize) {
+        let id = if Some(file_index) == self.active_file {
+            self.scene.as_ref().map(|s| s.id)
+        } else {
+            self.files.get(file_index).and_then(|f| f.scene.as_ref()).map(|s| s.id)
+        };
+        let Some(id) = id else { return };
+        if let Some(l) = &mut self.layout {
+            if let Some(c) = l.cells.get_mut(cell) {
+                *c = crate::layout::Cell::new(Some(id));
+            }
+            if !l.files.contains(&id) {
+                l.files.push(id);
+            }
+        }
+        self.refresh_layout_photos();
+    }
+
+    /// Redraw the layout preview when the layout changed.
+    pub fn refresh_layout_texture(&mut self, ctx: &egui::Context) {
+        let Some(layout) = &self.layout else { return };
+        if self.layout_drawn.as_ref() == Some(layout) && self.layout_tex.is_some() {
+            return;
+        }
+        let (w, h) = layout.size(1600);
+        let photos = &self.layout_photos;
+        let img = crate::layout::render(layout, w, h, &|id| photos.get(&id));
+        let c = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
+        match &mut self.layout_tex {
+            Some(t) => t.set(c, TextureOptions::LINEAR),
+            None => self.layout_tex = Some(ctx.load_texture("layout", c, TextureOptions::LINEAR)),
+        }
+        self.layout_drawn = Some(layout.clone());
+    }
+
+    /// Save the layout at full quality (in the background).
+    pub fn export_layout(&mut self) {
+        let Some(layout) = self.layout.clone() else { return };
+        if self.task.is_some() {
+            return;
+        }
+        self.save_edits_to_scene();
+        let format = self.layout_format;
+        let ext = format.extension().unwrap_or("png");
+        let one = [ext];
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Save layout")
+            .set_file_name(format!("layout.{ext}"))
+            .add_filter(format.label(), if format == Format::Heif { &["heic", "heif"][..] } else { &one[..] })
+            .save_file()
+        else {
+            return;
+        };
+        let long = self.layout_size;
+        // Each photo at no more than the layout's size, with its edits.
+        let sources: Vec<(u64, RgbaImage, CropRect, crate::scene::Edits)> = layout
+            .cells
+            .iter()
+            .filter_map(|c| c.source)
+            .filter_map(|id| {
+                self.scene_and_edits(id).map(|(s, e)| (id, crate::scene::downscale(&s.full, long), s.crop, e))
+            })
+            .collect();
+        let progress = Arc::new(Progress::new());
+        let (tx, rx) = channel();
+        let path2 = path.clone();
+        std::thread::spawn(move || {
+            let photos: std::collections::HashMap<u64, RgbaImage> = sources
+                .into_iter()
+                .map(|(id, img, crop, edits)| (id, framed_still(&img, crop, &edits, long)))
+                .collect();
+            let (w, h) = layout.size(long);
+            let img = crate::layout::render(&layout, w, h, &|id| photos.get(&id));
+            let _ = tx.send(TaskResult::Saved(crate::export::save_still(format, &img, &path2)));
+        });
+        self.task = Some(Task { progress, rx, kind: TaskKind::Export, label: "Saving layout".into() });
     }
 
     /// Redraw the file list thumbnail of the current file.
@@ -1647,6 +1954,15 @@ impl StudioApp {
     }
 }
 
+/// A file's finished still: colour edits, then crop, caption and border,
+/// from a picture made no larger than `long` on its longest side.
+fn framed_still(full: &RgbaImage, crop: CropRect, edits: &crate::scene::Edits, long: u32) -> RgbaImage {
+    let mut img = crate::scene::downscale(full, long);
+    crate::finish::apply_look(&mut img, &edits.look);
+    let overlay = caption_overlay(&edits.caption, crop, &img, &edits.border);
+    finish_frame(&img, crop, &overlay, edits.border)
+}
+
 /// The caption for the cropped picture: picture-sized, or output-sized
 /// (flag true) when it goes in the border.
 fn caption_overlay(
@@ -1788,6 +2104,12 @@ impl eframe::App for StudioApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG))
-            .show(ui, |ui| crate::canvas::canvas(self, ui));
+            .show(ui, |ui| {
+                if self.layout_open {
+                    crate::layout_view::canvas(self, ui);
+                } else {
+                    crate::canvas::canvas(self, ui);
+                }
+            });
     }
 }

@@ -12,6 +12,15 @@ pub enum Place {
     Bottom,
 }
 
+/// Where the caption goes: on the picture, or in the border around it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Area {
+    Picture,
+    /// In the border strip (bottom strip for Bottom and Middle, top strip
+    /// for Top). Needs a border; without one it stays on the picture.
+    Border,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Align {
     Left,
@@ -33,6 +42,7 @@ pub struct Caption {
     /// Distance from the edge as a fraction of the picture height.
     pub margin: f32,
     pub shadow: bool,
+    pub area: Area,
 }
 
 pub const DEFAULT_SIZE: f32 = 0.07;
@@ -51,6 +61,7 @@ impl Default for Caption {
             align: Align::Center,
             margin: DEFAULT_MARGIN,
             shadow: true,
+            area: Area::Picture,
         }
     }
 }
@@ -67,21 +78,61 @@ impl Caption {
     /// The caption alone, on a transparent picture of size `w` x `h`.
     /// `None` when there is nothing to draw.
     pub fn render(&self, w: u32, h: u32) -> Option<RgbaImage> {
+        let margin = self.margin * h as f32;
+        self.render_box(w, h, [0.0, 0.0, w as f32, h as f32], h as f32, margin, false)
+    }
+
+    /// Whether the caption goes in the border (only when a border is on).
+    pub fn on_border(&self, border: &crate::border::Border) -> bool {
+        self.area == Area::Border && border.enabled
+    }
+
+    /// The caption for a `w` x `h` picture with `border` around it. The
+    /// flag is true when it is drawn on the whole output (picture and
+    /// border), so it is blended after the border is added.
+    pub fn render_with_border(&self, w: u32, h: u32, border: &crate::border::Border) -> Option<(RgbaImage, bool)> {
+        if !self.on_border(border) {
+            return self.render(w, h).map(|img| (img, false));
+        }
+        let [ow, oh, ox, oy] = border.layout(w as f32, h as f32);
+        let (ow_px, oh_px) = ((ow.round() as u32).max(w), (oh.round() as u32).max(h));
+        // The strip the text sits in, centered in it from top to bottom.
+        let (y0, y1) = match self.place {
+            Place::Top => (0.0, oy),
+            Place::Middle | Place::Bottom => (oy + h as f32, oh),
+        };
+        // Left and right text lines up with the picture's edges.
+        let img = self.render_box(ow_px, oh_px, [0.0, y0, ow, y1], h as f32, ox, true)?;
+        Some((img, true))
+    }
+
+    /// Draw the caption on a transparent `cw` x `ch` picture, inside the box
+    /// `zone` (x0, y0, x1, y1). Letter size and margin follow `ref_h` (the
+    /// picture's height); `inset` is the distance from the box's sides for
+    /// left and right alignment. With `center` the text is centered top to
+    /// bottom in the box whatever the place.
+    fn render_box(&self, cw: u32, ch: u32, zone: [f32; 4], ref_h: f32, inset: f32, center: bool) -> Option<RgbaImage> {
+        let (w, h) = (cw, ch);
         if !self.enabled || self.text.trim().is_empty() || w == 0 || h == 0 {
             return None;
         }
         let bytes = crate::fonts::font_bytes(&self.font)?;
         let font = FontRef::try_from_slice(&bytes).ok()?;
-        let px = (self.size * h as f32).max(4.0);
+        let px = (self.size * ref_h).max(4.0);
         let scaled = font.as_scaled(PxScale::from(px));
         let line_h = scaled.height() + scaled.line_gap();
         let lines: Vec<&str> = self.text.lines().collect();
         let block_h = line_h * lines.len() as f32;
-        let margin = self.margin * h as f32;
-        let top = match self.place {
-            Place::Top => margin,
-            Place::Middle => (h as f32 - block_h) / 2.0,
-            Place::Bottom => h as f32 - margin - block_h,
+        let margin = self.margin * ref_h;
+        let [zx0, zy0, zx1, zy1] = zone;
+        let top = if center {
+            zy0 + (zy1 - zy0 - block_h) / 2.0
+        } else {
+            match self.place {
+                Place::Top => zy0 + margin,
+                Place::Middle => zy0 + (zy1 - zy0 - block_h) / 2.0,
+                Place::Bottom => zy1 - margin - block_h,
+            }
         };
 
         // Coverage of the letters (0..1) and of the shadow.
@@ -98,9 +149,9 @@ impl Caption {
                 prev = Some(id);
             }
             let x0 = match self.align {
-                Align::Left => margin,
-                Align::Center => (w as f32 - width) / 2.0,
-                Align::Right => w as f32 - margin - width,
+                Align::Left => zx0 + inset,
+                Align::Center => (zx0 + zx1 - width) / 2.0,
+                Align::Right => zx1 - inset - width,
             };
             let baseline = top + li as f32 * line_h + scaled.ascent();
             let mut x = x0;
@@ -187,5 +238,22 @@ mod tests {
         blend(&mut img, &o);
         assert!(img.pixels().any(|p| p[0] > 200));
         assert!(Caption { enabled: false, ..c.clone() }.render(400, 200).is_none());
+    }
+
+    #[test]
+    fn caption_in_the_border_strip() {
+        let border = crate::border::Border::polaroid();
+        let c = Caption { enabled: true, text: "Hello".into(), area: Area::Border, size: 0.05, ..Caption::default() };
+        let (o, on_border) = c.render_with_border(400, 400, &border).unwrap();
+        assert!(on_border);
+        let [ow, oh, _, oy] = border.layout(400.0, 400.0);
+        assert_eq!(o.dimensions(), (ow.round() as u32, oh.round() as u32));
+        // All ink is below the picture, inside the bottom strip.
+        let ink_rows: Vec<u32> = (0..o.height()).filter(|&y| (0..o.width()).any(|x| o.get_pixel(x, y)[3] > 0)).collect();
+        assert!(!ink_rows.is_empty());
+        assert!(*ink_rows.first().unwrap() as f32 > oy + 400.0);
+        // Without a border it stays on the picture.
+        let (_, on) = c.render_with_border(400, 400, &crate::border::Border::default()).unwrap();
+        assert!(!on);
     }
 }

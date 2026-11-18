@@ -133,7 +133,7 @@ pub fn top_bar(app: &mut StudioApp, ui: &mut egui::Ui) {
             }
             if ui
                 .add_enabled(can_undo, top_icon(Icon::Undo))
-                .on_hover_text("Undo (Cmd/Ctrl+Z): painting, arrows, pins, crop and rotation")
+                .on_hover_text("Undo (Cmd/Ctrl+Z): painting, arrows, pins, crop, rotation and colour changes (Edit, curves, presets, film)")
                 .clicked()
             {
                 let ctx = ui.ctx().clone();
@@ -1753,6 +1753,9 @@ pub fn border_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 }
             });
         });
+        if app.border.enabled && app.border.fit == crate::border::BorderFit::Polaroid {
+            polaroid_controls(app, ui);
+        }
         // Resulting output size.
         if let Some(sc) = &app.scene {
             let [_, _, cw, ch] = sc.crop.pixels(sc.full.width(), sc.full.height());
@@ -1765,6 +1768,79 @@ pub fn border_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             ui.label(egui::RichText::new(text).size(12.0).color(theme::TEXT_DIM));
         }
     });
+}
+
+/// Polaroid frame: the bottom strip's depth, set directly or by a target
+/// ratio (typed, or one of the instant-film card sizes).
+fn polaroid_controls(app: &mut StudioApp, ui: &mut egui::Ui) {
+    let Some(sc) = &app.scene else { return };
+    let [_, _, cw, ch] = sc.crop.pixels(sc.full.width(), sc.full.height());
+    let (w, h) = (cw as f32, ch as f32);
+    let b = &mut app.border;
+    let shown = b.polaroid_bottom(w, h);
+
+    ui.label(egui::RichText::new("Polaroid bottom strip").size(12.0).color(theme::TEXT_DIM));
+    ui.horizontal(|ui| {
+        let mut depth = shown;
+        let r = ui
+            .add(
+                egui::Slider::new(&mut depth, crate::border::POLAROID_BOTTOM_RANGE)
+                    .text("Bottom")
+                    .custom_formatter(|v, _| format!("{v:.1}×"))
+                    .custom_parser(|t| t.trim_end_matches('×').trim().parse::<f64>().ok()),
+            )
+            .on_hover_text("How deep the bottom strip is, in times the top and side edges. Moving it lets go of the target ratio.");
+        if r.changed() {
+            b.bottom = depth;
+            b.target = None;
+        }
+        let is_default = b.target.is_none() && b.bottom == crate::border::POLAROID_BOTTOM;
+        if reset_icon(ui, is_default) {
+            b.bottom = crate::border::POLAROID_BOTTOM;
+            b.target = None;
+        }
+    });
+
+    // Target ratio, written as width : height with width 1.
+    let [ow, oh, _, _] = b.layout(w, h);
+    let mut target = b.target.unwrap_or(if ow > 0.0 { oh / ow } else { 1.0 });
+    ui.horizontal(|ui| {
+        ui.label("Target ratio  1 :");
+        let r = ui
+            .add(egui::DragValue::new(&mut target).range(0.5..=3.0).speed(0.005).fixed_decimals(2))
+            .on_hover_text(
+                "Height for a width of 1 (above 1 is tall, below 1 is wide). The bottom strip grows \
+                 or shrinks to reach it. The picture is not cropped.",
+            );
+        if r.changed() {
+            b.target = Some(target);
+        }
+        let note = if b.target.is_some() { format!("({}, set)", ratio_text(1.0, target)) } else { format!("({})", ratio_text(1.0, target)) };
+        ui.label(egui::RichText::new(note).size(11.0).color(if b.target.is_some() { theme::ACCENT } else { theme::TEXT_DIM }));
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        for (name, ratio, tip) in crate::border::INSTANT_CARDS {
+            let sel = b.target.is_some_and(|t| (t - ratio).abs() < 1e-4);
+            let label = format!("{name} {}", ratio_text(1.0, ratio));
+            let btn = egui::Button::new(egui::RichText::new(label).size(12.0).color(if sel { Color32::WHITE } else { theme::TEXT }))
+                .fill(if sel { theme::ACCENT } else { theme::PANEL })
+                .corner_radius(CornerRadius::same(12));
+            if ui.add(btn).on_hover_text(tip).clicked() {
+                b.target = Some(ratio);
+            }
+        }
+    });
+    if !b.polaroid_target_reached(w, h) {
+        ui.label(
+            egui::RichText::new(
+                "This picture can't reach that ratio with the bottom strip alone. \
+                 Change Thickness, or crop the picture closer to the card's shape.",
+            )
+            .size(12.0)
+            .color(Color32::from_rgb(240, 180, 90)),
+        );
+    }
 }
 
 /// "16:9" for common shapes, otherwise "1.47:1".
@@ -1841,6 +1917,34 @@ pub fn caption_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 }
             });
             ui.checkbox(&mut c.shadow, "Text shadow");
+            ui.horizontal(|ui| {
+                ui.label("Where");
+                use crate::caption::Area;
+                if ui.selectable_label(c.area == Area::Picture, "On picture").clicked() {
+                    c.area = Area::Picture;
+                }
+                let r = ui
+                    .add_enabled(app.border.enabled, egui::Button::selectable(c.area == Area::Border, "In border"))
+                    .on_hover_text("In the border strip below the picture (or above it with Top)")
+                    .on_disabled_hover_text("Turn on a border first (Border card)");
+                if r.clicked() && c.area != Area::Border {
+                    c.area = Area::Border;
+                    // White text with a shadow suits a photo, not a light border.
+                    let [r, g, b] = app.border.color;
+                    let light = (r as u32 + g as u32 + b as u32) > 3 * 160;
+                    if light && c.color == [255, 255, 255] {
+                        c.color = [40, 40, 40];
+                        c.shadow = false;
+                    }
+                }
+            });
+            if c.area == crate::caption::Area::Border && !app.border.enabled {
+                ui.label(
+                    egui::RichText::new("No border is on, so the caption is shown on the picture.")
+                        .size(12.0)
+                        .color(theme::TEXT_DIM),
+                );
+            }
             ui.horizontal(|ui| {
                 ui.label("Place");
                 use crate::caption::Place;

@@ -159,6 +159,8 @@ pub struct StudioApp {
     /// Caption on the output, its preview texture and the fonts to choose from.
     pub caption: crate::caption::Caption,
     pub caption_tex: Option<TextureHandle>,
+    /// The caption preview covers the whole output (it sits in the border).
+    pub caption_on_border: bool,
     caption_key: String,
     pub fonts_added: Vec<crate::fonts::FontEntry>,
     pub fonts_installed: Vec<crate::fonts::FontEntry>,
@@ -239,6 +241,8 @@ pub struct StudioApp {
     pub arrow_len: f32,
     pub crop_before: Option<CropRect>,
     photo_look: Option<Look>,
+    /// The look at the last undo step, with the file it belongs to.
+    look_committed: Option<(u64, Look)>,
     /// The still at the chosen view quality, before the look.
     still_base: Option<RgbaImage>,
     /// The view quality `still_base` was made at.
@@ -285,6 +289,7 @@ impl StudioApp {
             prefs_saved: crate::settings::Prefs::default(),
             caption: crate::caption::Caption::default(),
             caption_tex: None,
+            caption_on_border: false,
             caption_key: String::new(),
             fonts_added: crate::fonts::added_fonts(),
             fonts_installed: crate::fonts::installed_fonts(),
@@ -341,6 +346,7 @@ impl StudioApp {
             arrow_len: defaults::ARROW_LEN,
             crop_before: None,
             photo_look: None,
+            look_committed: None,
             still_base: None,
             still_base_size: None,
             photo_fast: false,
@@ -892,11 +898,39 @@ impl StudioApp {
         if turned {
             self.after_turn(ctx);
         }
+        // Colour settings come back with the step.
+        if let Some(s) = &self.scene {
+            self.look = s.edits.look;
+            self.look_committed = Some((s.id, self.look));
+        }
         // Loops made from this file follow its crop.
         if let Some(c) = self.scene.as_ref().map(|s| s.crop) {
             self.set_crop(c);
         }
         self.crop_drag = None;
+    }
+
+    /// Make each finished change to the colour settings (a slider let go, a
+    /// curve point dropped, a preset or film picked, Reset) one undo step.
+    fn track_look_undo(&mut self, ctx: &egui::Context) {
+        let busy = ctx.input(|i| i.pointer.any_down());
+        let look = self.look;
+        let Some(scene) = &mut self.scene else {
+            self.look_committed = None;
+            return;
+        };
+        match self.look_committed {
+            Some((id, old)) if id == scene.id => {
+                if old != look && !busy {
+                    scene.edits.look = old;
+                    scene.checkpoint();
+                    self.look_committed = Some((id, look));
+                }
+            }
+            // Another file is open: start from its look.
+            _ => self.look_committed = Some((scene.id, look)),
+        }
+        scene.edits.look = look;
     }
 
     /// Redraw everything that shows the picture after a quarter turn.
@@ -1101,7 +1135,7 @@ impl StudioApp {
         std::thread::spawn(move || {
             let mut img = photo;
             crate::finish::apply_look(&mut img, &look);
-            let img = finish_frame(&img, crop, &caption_overlay(&caption, crop, &img), border);
+            let img = finish_frame(&img, crop, &caption_overlay(&caption, crop, &img, &border), border);
             let result = crate::export::save_still(format, &img, &path2);
             let _ = tx.send(TaskResult::Saved(result));
         });
@@ -1183,7 +1217,7 @@ impl StudioApp {
                 }
             };
             let frames = frames.map(|f| {
-                let overlay = f.first().and_then(|x| caption_overlay(&caption, crop, x));
+                let overlay = f.first().and_then(|x| caption_overlay(&caption, crop, x, &border));
                 if crop.is_full() && !border.enabled && overlay.is_none() {
                     f
                 } else {
@@ -1462,7 +1496,7 @@ impl StudioApp {
         };
         let [iw, ih] = scene.work_size();
         let [_, _, w, h] = scene.crop.pixels(iw, ih);
-        let key = self.caption.key(w, h);
+        let key = format!("{}{:?}", self.caption.key(w, h), self.border);
         if key == self.caption_key {
             return;
         }
@@ -1478,8 +1512,10 @@ impl StudioApp {
         } else {
             self.caption.clone()
         };
-        self.caption_tex = shown.render(w, h).map(|img| {
-            let c = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
+        let rendered = shown.render_with_border(w, h, &self.border);
+        self.caption_on_border = rendered.as_ref().is_some_and(|r| r.1);
+        self.caption_tex = rendered.map(|(img, _)| {
+            let c = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
             ctx.load_texture("caption", c, TextureOptions::LINEAR)
         });
     }
@@ -1555,28 +1591,35 @@ impl StudioApp {
     }
 }
 
-/// The caption drawn at the size of the cropped picture.
+/// The caption for the cropped picture: picture-sized, or output-sized
+/// (flag true) when it goes in the border.
 fn caption_overlay(
     caption: &crate::caption::Caption,
     crop: CropRect,
     full: &RgbaImage,
-) -> Option<RgbaImage> {
+    border: &crate::border::Border,
+) -> Option<(RgbaImage, bool)> {
     let [_, _, w, h] = crop.pixels(full.width(), full.height());
-    caption.render(w, h)
+    caption.render_with_border(w, h, border)
 }
 
-/// Crop, then caption, then border: the last steps before saving a frame.
+/// Crop, caption and border: the last steps before saving a frame. A
+/// caption on the picture goes on before the border, one in the border after.
 fn finish_frame(
     img: &RgbaImage,
     crop: CropRect,
-    caption: &Option<RgbaImage>,
+    caption: &Option<(RgbaImage, bool)>,
     border: crate::border::Border,
 ) -> RgbaImage {
     let mut out = crop.apply(img);
-    if let Some(c) = caption {
+    if let Some((c, false)) = caption {
         crate::caption::blend(&mut out, c);
     }
-    border.apply(&out)
+    let mut out = border.apply(&out);
+    if let Some((c, true)) = caption {
+        crate::caption::blend(&mut out, c);
+    }
+    out
 }
 
 /// Every file type the Open dialog offers.
@@ -1604,6 +1647,7 @@ impl eframe::App for StudioApp {
         let ctx = ui.ctx().clone();
         self.poll_task(&ctx);
         self.handle_dropped_files(&ctx);
+        self.track_look_undo(&ctx);
         self.shortcuts(&ctx);
         self.refresh_mask_texture(&ctx);
         // Preview of the preset under the pointer (set during the last frame).

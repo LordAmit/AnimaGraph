@@ -18,8 +18,17 @@ pub enum BorderFit {
     Polaroid,
 }
 
-/// The bottom strip of the instant-photo frame is this many times the sides.
+/// The bottom strip of the instant-photo frame is this many times the sides
+/// (the default; the person can change it).
 pub const POLAROID_BOTTOM: f32 = 3.6;
+/// Range offered for the bottom strip, in times the sides.
+pub const POLAROID_BOTTOM_RANGE: std::ops::RangeInclusive<f32> = 0.5..=8.0;
+/// Card proportions of real instant films, as height ÷ width.
+pub const INSTANT_CARDS: [(&str, f32, &str); 3] = [
+    ("Square instant", 107.0 / 88.0, "Square picture card, about 88 × 107 mm"),
+    ("Mini instant", 86.0 / 54.0, "Small tall card, about 54 × 86 mm"),
+    ("Wide instant", 86.0 / 108.0, "Wide card, about 108 × 86 mm"),
+];
 
 impl BorderFit {
     pub fn label(self) -> &'static str {
@@ -51,20 +60,52 @@ pub struct Border {
     pub size: f32,
     pub color: [u8; 3],
     pub fit: BorderFit,
+    /// Polaroid: depth of the bottom strip in times the top and sides.
+    pub bottom: f32,
+    /// Polaroid: output height ÷ width to reach. When set, the bottom strip
+    /// is sized to reach it and `bottom` is not used.
+    pub target: Option<f32>,
 }
 
 pub const DEFAULT_SIZE: f32 = 0.05;
 
 impl Default for Border {
     fn default() -> Self {
-        Self { enabled: false, size: DEFAULT_SIZE, color: [255, 255, 255], fit: BorderFit::Even }
+        Self {
+            enabled: false,
+            size: DEFAULT_SIZE,
+            color: [255, 255, 255],
+            fit: BorderFit::Even,
+            bottom: POLAROID_BOTTOM,
+            target: None,
+        }
     }
 }
 
 impl Border {
     /// Cream instant-photo frame.
     pub fn polaroid() -> Self {
-        Self { enabled: true, size: 0.075, color: [250, 248, 242], fit: BorderFit::Polaroid }
+        Self { enabled: true, size: 0.075, color: [250, 248, 242], fit: BorderFit::Polaroid, ..Self::default() }
+    }
+
+    /// Depth of the Polaroid bottom strip, in times the sides, for a
+    /// `w` x `h` picture: the chosen depth, or the one that reaches the
+    /// target ratio (limited to what the slider offers).
+    pub fn polaroid_bottom(&self, w: f32, h: f32) -> f32 {
+        let b = self.size.max(0.0) * w.min(h);
+        let (lo, hi) = (*POLAROID_BOTTOM_RANGE.start(), *POLAROID_BOTTOM_RANGE.end());
+        match self.target {
+            Some(t) if b > 0.0 => ((t * (w + 2.0 * b) - h) / b - 1.0).clamp(lo, hi),
+            _ => self.bottom,
+        }
+    }
+
+    /// Whether the target ratio is reached (it may need a strip deeper or
+    /// shallower than the slider allows).
+    pub fn polaroid_target_reached(&self, w: f32, h: f32) -> bool {
+        let Some(t) = self.target else { return true };
+        let [ow, oh, _, _] = self.layout(w, h);
+        ow > 0.0 && (oh / ow - t).abs() < 0.005
     }
 
     /// Output size and where the picture sits in it, for a `w` x `h` picture:
@@ -75,7 +116,7 @@ impl Border {
         }
         let b = self.size.max(0.0) * w.min(h);
         if self.fit == BorderFit::Polaroid {
-            return [w + 2.0 * b, h + b * (1.0 + POLAROID_BOTTOM), b, b];
+            return [w + 2.0 * b, h + b * (1.0 + self.polaroid_bottom(w, h)), b, b];
         }
         let (mut ow, mut oh) = match self.fit {
             BorderFit::KeepShape => {
@@ -157,6 +198,25 @@ mod tests {
         // Picture sits at the top-left offset; the bottom strip is frame color.
         assert_eq!(out.get_pixel(30, 30)[0], 0);
         assert_eq!(out.get_pixel(230, out.height() - 10)[0], 250);
+    }
+
+    #[test]
+    fn polaroid_bottom_strip_and_target_ratio() {
+        let mut b = Border::polaroid();
+        b.bottom = 1.0;
+        let [w, h, ox, _] = b.layout(400.0, 600.0);
+        // A 1x strip is as deep as the sides.
+        assert!((h - 600.0 - 2.0 * ox).abs() < 1e-3);
+        assert!((w - 460.0).abs() < 1e-3);
+        // A target ratio sizes the strip to reach it.
+        b.target = Some(86.0 / 54.0);
+        let [w, h, _, _] = b.layout(400.0, 600.0);
+        assert!((h / w - 86.0 / 54.0).abs() < 1e-3);
+        assert!(b.polaroid_target_reached(400.0, 600.0));
+        // A wide card cannot be reached by a tall picture: limited, and reported.
+        b.target = Some(0.8);
+        assert!(!b.polaroid_target_reached(400.0, 600.0));
+        assert!((b.polaroid_bottom(400.0, 600.0) - 0.5).abs() < 1e-6);
     }
 
     #[test]

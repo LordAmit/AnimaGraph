@@ -20,6 +20,8 @@ pub struct Snapshot {
     pins: Vec<[f32; 2]>,
     crop: crate::crop::CropRect,
     aspect: crate::crop::Aspect,
+    /// Colour settings (Edit, presets, film), so they undo too.
+    look: crate::finish::Look,
 }
 
 /// One undo step: a saved state, or a quarter turn (undone by turning back).
@@ -236,6 +238,7 @@ impl Scene {
             pins: self.pins.clone(),
             crop: self.crop,
             aspect: self.aspect,
+            look: self.edits.look,
         }
     }
 
@@ -249,6 +252,7 @@ impl Scene {
         }
         self.crop = s.crop;
         self.aspect = s.aspect;
+        self.edits.look = s.look;
         self.mask_version += 1;
     }
 
@@ -487,6 +491,21 @@ mod tests {
         assert_eq!(s.full.dimensions(), (40, 20));
         assert_eq!(s.mask[0], 1.0);
         assert!((s.arrows[0].from[0] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn colour_changes_undo_and_redo() {
+        let mut s = Scene::new("t".into(), RgbaImage::new(40, 20));
+        let before = s.edits.look;
+        s.checkpoint();
+        s.edits.look.curves[0] = crate::develop::Curve::from_points(&[[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]);
+        s.edits.look.contrast = 0.4;
+        let after = s.edits.look;
+        assert!(s.can_undo());
+        s.undo();
+        assert_eq!(s.edits.look, before);
+        s.redo();
+        assert_eq!(s.edits.look, after);
     }
 
     #[test]

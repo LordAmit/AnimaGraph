@@ -24,11 +24,45 @@ pub struct Snapshot {
     look: crate::finish::Look,
 }
 
-/// One undo step: a saved state, or a quarter turn (undone by turning back).
+/// One undo step: a saved state, a quarter turn (undone by turning back),
+/// or a change of the straighten angle (undone by going back to `from`).
 #[derive(Clone)]
 enum Step {
     State(Snapshot),
     Turn { clockwise: bool },
+    Angle { from: f32 },
+}
+
+/// Every frame of a clip turned by `turn`.
+fn turn_video(v: &crate::video::VideoSource, turn: &dyn Fn(&RgbaImage) -> RgbaImage) -> crate::video::VideoSource {
+    crate::video::VideoSource {
+        frames: v.frames.iter().map(turn).collect(),
+        work: v.work.iter().map(turn).collect(),
+        fps: v.fps,
+        apple_log: v.apple_log,
+        log_frames: v.log_frames.as_ref().map(|l| std::sync::Arc::new(l.iter().map(turn).collect())),
+        log_converted: v.log_converted,
+    }
+}
+
+/// The picture before straightening, kept so the angle can change freely.
+struct StraightBase {
+    full: RgbaImage,
+    work: RgbaImage,
+    video: Option<std::sync::Arc<crate::video::VideoSource>>,
+}
+
+/// Every frame of a clip turned by `degrees` (see `straighten`).
+fn straighten_video(v: &crate::video::VideoSource, degrees: f32) -> crate::video::VideoSource {
+    use crate::straighten::rotate_fill;
+    crate::video::VideoSource {
+        frames: v.frames.iter().map(|f| rotate_fill(f, degrees)).collect(),
+        work: v.work.iter().map(|f| rotate_fill(f, degrees)).collect(),
+        fps: v.fps,
+        apple_log: v.apple_log,
+        log_frames: v.log_frames.as_ref().map(|l| std::sync::Arc::new(l.iter().map(|f| rotate_fill(f, degrees)).collect())),
+        log_converted: v.log_converted,
+    }
 }
 
 /// Edit settings kept per file (crop and rotation live on the scene itself).
@@ -66,6 +100,12 @@ pub struct Scene {
     pub still_index: usize,
     /// Video trim: first and last frame used (inclusive).
     pub trim: [usize; 2],
+    /// Straighten angle in degrees (positive = clockwise), -45 to 45.
+    pub angle: f32,
+    /// The full-size picture (and video frames) still show an older angle;
+    /// only `work` is up to date (while the angle slider is dragged).
+    pub full_outdated: bool,
+    straight_base: Option<StraightBase>,
     undo: Vec<Step>,
     redo: Vec<Step>,
 }
@@ -90,6 +130,9 @@ impl Scene {
             video: None,
             still_index: 0,
             trim: [0, 0],
+            angle: 0.0,
+            full_outdated: false,
+            straight_base: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -153,6 +196,83 @@ impl Scene {
         [self.work.width(), self.work.height()]
     }
 
+    /// Straighten: turn the picture by `degrees` (-45 to 45), zoomed to keep
+    /// its size with no empty corners. With `quick` only the editing copy is
+    /// redrawn (for dragging); `finish_angle` then redraws the rest.
+    /// Painted areas, arrows and crop stay where they are on the picture.
+    pub fn set_angle(&mut self, degrees: f32, quick: bool) {
+        let degrees = degrees.clamp(-45.0, 45.0);
+        if degrees.abs() < 1e-3 {
+            if let Some(b) = self.straight_base.take() {
+                self.full = b.full;
+                self.work = b.work;
+                if b.video.is_some() {
+                    self.video = b.video;
+                }
+            }
+            self.angle = 0.0;
+            self.full_outdated = false;
+            self.reload_still();
+            return;
+        }
+        if self.straight_base.is_none() {
+            self.straight_base =
+                Some(StraightBase { full: self.full.clone(), work: self.work.clone(), video: self.video.clone() });
+        }
+        self.angle = degrees;
+        let Some(b) = &self.straight_base else { return };
+        let i = self.still_index;
+        // A clip's still comes from its frames (the frozen frame may have changed).
+        let base_work = b.video.as_ref().and_then(|v| v.work.get(i)).unwrap_or(&b.work);
+        self.work = crate::straighten::rotate_fill(base_work, degrees);
+        if quick {
+            self.full_outdated = true;
+            return;
+        }
+        if let Some(v) = &b.video {
+            self.video = Some(std::sync::Arc::new(straighten_video(v, degrees)));
+        }
+        let base_full = b.video.as_ref().and_then(|v| v.frames.get(i)).unwrap_or(&b.full);
+        self.full = crate::straighten::rotate_fill(base_full, degrees);
+        self.full_outdated = false;
+    }
+
+    /// Redraw what a quick angle change left out.
+    pub fn finish_angle(&mut self) {
+        if self.full_outdated {
+            self.set_angle(self.angle, false);
+        }
+    }
+
+    /// Record an angle change (from `from` to the current angle) for undo.
+    pub fn push_angle_step(&mut self, from: f32) {
+        if (from - self.angle).abs() > 1e-4 {
+            self.push_undo(Step::Angle { from });
+            self.redo.clear();
+        }
+    }
+
+    /// For a clip, show the frozen frame of the current frames.
+    fn reload_still(&mut self) {
+        if let Some(v) = &self.video {
+            let i = self.still_index.min(v.frames.len() - 1);
+            self.full = v.frames[i].clone();
+            self.work = v.work[i].clone();
+        }
+    }
+
+    /// Switch the Apple Log conversion of the clip before straightening too,
+    /// so a later angle change keeps the choice.
+    pub fn switch_base_log(&mut self, convert: bool) {
+        if let Some(b) = &mut self.straight_base {
+            if let Some(v) = &b.video {
+                if let Some(s) = v.log_switched(convert) {
+                    b.video = Some(std::sync::Arc::new(s));
+                }
+            }
+        }
+    }
+
     /// Turn the picture a quarter turn (`clockwise` = right). The painted
     /// area, arrows, pins and crop turn with it. Undo turns it back.
     pub fn rotate(&mut self, clockwise: bool) {
@@ -183,6 +303,15 @@ impl Scene {
         self.mask = mask;
         self.full = turn(&self.full);
         self.work = turn(&self.work);
+        // The picture before straightening turns too (turns and the angle
+        // can be applied in any order).
+        if let Some(b) = &mut self.straight_base {
+            b.full = turn(&b.full);
+            b.work = turn(&b.work);
+            if let Some(v) = &b.video {
+                b.video = Some(std::sync::Arc::new(turn_video(v, &turn)));
+            }
+        }
         for a in &mut self.arrows {
             a.from = point(a.from);
             a.to = point(a.to);
@@ -197,17 +326,7 @@ impl Scene {
             self.aspect = Aspect::Free;
         }
         if let Some(v) = &self.video {
-            let frames: Vec<RgbaImage> = v.frames.iter().map(turn).collect();
-            let work: Vec<RgbaImage> = v.work.iter().map(turn).collect();
-            let log_frames = v.log_frames.as_ref().map(|l| std::sync::Arc::new(l.iter().map(turn).collect()));
-            self.video = Some(std::sync::Arc::new(crate::video::VideoSource {
-                frames,
-                work,
-                fps: v.fps,
-                apple_log: v.apple_log,
-                log_frames,
-                log_converted: v.log_converted,
-            }));
+            self.video = Some(std::sync::Arc::new(turn_video(v, &turn)));
         }
         self.mask_version += 1;
     }
@@ -279,6 +398,11 @@ impl Scene {
                 self.redo.push(Step::Turn { clockwise });
                 true
             }
+            Some(Step::Angle { from }) => {
+                self.redo.push(Step::Angle { from: self.angle });
+                self.set_angle(from, false);
+                true
+            }
             None => false,
         }
     }
@@ -295,6 +419,11 @@ impl Scene {
             Some(Step::Turn { clockwise }) => {
                 self.turn(clockwise);
                 self.push_undo(Step::Turn { clockwise });
+                true
+            }
+            Some(Step::Angle { from }) => {
+                self.push_undo(Step::Angle { from: self.angle });
+                self.set_angle(from, false);
                 true
             }
             None => false,
@@ -491,6 +620,32 @@ mod tests {
         assert_eq!(s.full.dimensions(), (40, 20));
         assert_eq!(s.mask[0], 1.0);
         assert!((s.arrows[0].from[0] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn straighten_keeps_size_turns_with_quarter_turns_and_undoes() {
+        let img = RgbaImage::from_fn(40, 20, |x, y| image::Rgba([x as u8 * 6, y as u8 * 12, 0, 255]));
+        let mut s = Scene::new("t".into(), img.clone());
+        s.set_angle(5.0, true);
+        assert!(s.full_outdated);
+        assert_eq!(s.full, img);
+        s.finish_angle();
+        assert!(!s.full_outdated);
+        assert_eq!(s.full.dimensions(), (40, 20));
+        assert_ne!(s.full, img);
+        s.push_angle_step(0.0);
+        // A quarter turn keeps the angle; going back to 0 shows the turned original.
+        s.rotate(true);
+        assert_eq!(s.full.dimensions(), (20, 40));
+        s.set_angle(0.0, false);
+        assert_eq!(s.full, image::imageops::rotate90(&img));
+        s.set_angle(5.0, false);
+        // Undo the quarter turn, then the angle.
+        s.undo();
+        assert_eq!(s.full.dimensions(), (40, 20));
+        s.undo();
+        assert_eq!(s.full, img);
+        assert_eq!(s.angle, 0.0);
     }
 
     #[test]

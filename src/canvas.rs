@@ -134,6 +134,18 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
             }
         }
     }
+    // Grid while straightening, to line up horizons and walls.
+    if app.straightening {
+        let stroke = Stroke::new(1.0, Color32::from_white_alpha(110));
+        for i in 1..6 {
+            let x = img_rect.left() + img_rect.width() * i as f32 / 6.0;
+            painter.line_segment([Pos2::new(x, img_rect.top()), Pos2::new(x, img_rect.bottom())], stroke);
+        }
+        for i in 1..4 {
+            let y = img_rect.top() + img_rect.height() * i as f32 / 4.0;
+            painter.line_segment([Pos2::new(img_rect.left(), y), Pos2::new(img_rect.right(), y)], stroke);
+        }
+    }
     // Caption preview over the kept part of the picture.
     if !crop_tool && compare != Compare::Original {
         if let Some(t) = &app.caption_tex {

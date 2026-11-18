@@ -243,6 +243,10 @@ pub struct StudioApp {
     photo_look: Option<Look>,
     /// The look at the last undo step, with the file it belongs to.
     look_committed: Option<(u64, Look)>,
+    /// Straighten angle when the current change started (for undo).
+    angle_from: Option<f32>,
+    /// The straighten slider is being dragged: the canvas shows a grid.
+    pub straightening: bool,
     /// The still at the chosen view quality, before the look.
     still_base: Option<RgbaImage>,
     /// The view quality `still_base` was made at.
@@ -347,6 +351,8 @@ impl StudioApp {
             crop_before: None,
             photo_look: None,
             look_committed: None,
+            angle_from: None,
+            straightening: false,
             still_base: None,
             still_base_size: None,
             photo_fast: false,
@@ -708,6 +714,7 @@ impl StudioApp {
         }
         let Some(switched) = video.log_switched(convert) else { return };
         scene.video = Some(Arc::new(switched));
+        scene.switch_base_log(convert);
         let still = scene.still_index;
         self.set_still(ctx, still);
         self.status = if convert {
@@ -792,7 +799,7 @@ impl StudioApp {
         // size it is drawn quickly at the editing size while a slider is
         // dragged or a style is hovered, then again sharp once that stops.
         let size = self.prefs.still_view;
-        let sharp = size != crate::scene::WORK_SIZE;
+        let sharp = size != crate::scene::WORK_SIZE && !scene.full_outdated;
         let fast = sharp && (self.look_preview.is_some() || ctx.input(|i| i.pointer.any_down()));
         let rebuild_base = self.photo_look.is_none() || self.raw_tex.is_none() || self.still_base_size != Some(size);
         if self.photo_tex.is_some() && !rebuild_base && self.photo_look == Some(shown) && !(self.photo_fast && !fast) {
@@ -865,6 +872,55 @@ impl StudioApp {
     }
 
     /// Rotate the current file a quarter turn and refresh what shows it.
+    /// Straighten the current file to `degrees`. With `quick` (while the
+    /// slider is dragged) only the editing copy is redrawn; `finish_angle`
+    /// completes it and records one undo step.
+    pub fn set_angle(&mut self, ctx: &egui::Context, degrees: f32, quick: bool) {
+        let Some(scene) = &mut self.scene else { return };
+        if self.angle_from.is_none() {
+            self.angle_from = Some(scene.angle);
+        }
+        scene.set_angle(degrees, quick);
+        self.straightening = quick;
+        self.photo_look = None;
+        self.live_tex = None;
+        self.refresh_photo_texture(ctx);
+        if !quick {
+            self.finish_angle(ctx);
+        }
+    }
+
+    pub fn finish_angle(&mut self, ctx: &egui::Context) {
+        self.straightening = false;
+        let Some(scene) = &mut self.scene else { return };
+        let was_outdated = scene.full_outdated;
+        scene.finish_angle();
+        if let Some(from) = self.angle_from.take() {
+            scene.push_angle_step(from);
+        }
+        let angle = scene.angle;
+        if was_outdated {
+            self.photo_look = None;
+            self.live_tex = None;
+            self.refresh_photo_texture(ctx);
+        }
+        self.refresh_thumbnail();
+        self.status = if angle == 0.0 { "Straighten off.".into() } else { format!("Straightened {angle:+.1}°.") };
+    }
+
+    /// Redraw the file list thumbnail of the current file.
+    fn refresh_thumbnail(&mut self) {
+        let Some(scene) = &self.scene else { return };
+        let thumb_img = crate::scene::downscale(&scene.work, 160);
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [thumb_img.width() as usize, thumb_img.height() as usize],
+            thumb_img.as_raw(),
+        );
+        if let Some(entry) = self.active_file.and_then(|i| self.files.get_mut(i)) {
+            entry.thumb.set(color, TextureOptions::LINEAR);
+        }
+    }
+
     pub fn rotate_current(&mut self, ctx: &egui::Context, clockwise: bool) {
         let Some(scene) = &mut self.scene else { return };
         scene.rotate(clockwise);
@@ -1648,6 +1704,10 @@ impl eframe::App for StudioApp {
         self.poll_task(&ctx);
         self.handle_dropped_files(&ctx);
         self.track_look_undo(&ctx);
+        // A straighten drag that ended without the slider noticing.
+        if self.straightening && !ctx.input(|i| i.pointer.any_down()) {
+            self.finish_angle(&ctx);
+        }
         self.shortcuts(&ctx);
         self.refresh_mask_texture(&ctx);
         // Preview of the preset under the pointer (set during the last frame).

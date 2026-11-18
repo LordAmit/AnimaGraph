@@ -30,6 +30,7 @@ mod sample;
 mod scene;
 mod settings;
 mod stabilize;
+mod straighten;
 mod theme;
 mod video;
 

@@ -36,7 +36,7 @@ pub const PANELS: [(&str, &str); 17] = [
     ("motion", "Motion"),
     ("loop", "Loop"),
     ("video", "Video"),
-    ("crop", "Rotate & crop"),
+    ("crop", "Rotate, straighten & crop"),
     ("border", "Border"),
     ("caption", "Caption"),
     ("look", "Look"),
@@ -171,9 +171,10 @@ fn view_menu(app: &mut StudioApp, ui: &mut egui::Ui) {
         view_toggle(ui, app, "controls", "Settings bar (right)");
         ui.separator();
         ui.label(egui::RichText::new("Settings bar sections").size(11.0).color(theme::TEXT_DIM));
-        view_toggle(ui, app, "animate", "Animate");
         view_toggle(ui, app, "edit", "Edit");
+        view_toggle(ui, app, "framing", "Framing");
         view_toggle(ui, app, "styles", "Styles");
+        view_toggle(ui, app, "animate", "Animate");
         view_toggle(ui, app, "export", "Export");
         ui.separator();
         still_view_choice(ui, app);
@@ -221,26 +222,7 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
         ui.set_max_width(ui.available_width().min(312.0));
         let is_video = app.scene.as_ref().is_some_and(|s| s.is_video());
 
-        // Animate: what moves, how, and the button that makes the loop.
-        let (title, intro) = if is_video {
-            ("Freeze", "Select an area, choose whether it freezes or plays, then press Make loop.")
-        } else {
-            ("Animate", "Paint the area to animate, draw arrows in the direction of motion, then press Animate.")
-        };
-        if app.panel_visible("animate") {
-            drawer(app, ui, "drawer_animate", Icon::Sparkle, title, intro, |app, ui| {
-                region_card(app, ui);
-                if is_video {
-                    crate::panels::video_card(app, ui);
-                } else {
-                    motion_card(app, ui);
-                    loop_card(app, ui);
-                }
-                generate_block(app, ui);
-            });
-        }
-
-        // Edit: changes to the picture or video frames.
+        // Edit: light and colour.
         if app.panel_visible("edit") {
             drawer(
                 app,
@@ -248,7 +230,7 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                 "drawer_edit",
                 Icon::Image,
                 "Edit",
-                "Rotate, crop, add a border or caption, and adjust colors. Applies to saved images, loops and videos.",
+                "Adjust light, color, curves and effects. Applies to saved images, loops and videos.",
                 |app, ui| {
                     let others = app.files.len().saturating_sub(1);
                     let b = icons::button(Icon::Image, "Apply edits to all files", theme::TEXT);
@@ -256,17 +238,31 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                         .add_enabled(others > 0, b)
                         .on_hover_text(
                             "Copies this file's look, border and caption to the other open files. \
-                             Files opened later start without them. Crop and rotation are not copied.",
+                             Files opened later start without them. Crop, rotation and straightening are not copied.",
                         )
                         .on_disabled_hover_text("Open more than one file to use this")
                         .clicked()
                     {
                         app.apply_edits_to_all();
                     }
+                    crate::panels::adjust_card(app, ui);
+                },
+            );
+        }
+
+        // Framing: rotation, straightening, crop, border and caption.
+        if app.panel_visible("framing") {
+            drawer(
+                app,
+                ui,
+                "drawer_framing",
+                Icon::Crop,
+                "Framing",
+                "Rotate, straighten and crop, then add a border or caption.",
+                |app, ui| {
                     crate::panels::crop_card(app, ui);
                     crate::panels::border_card(app, ui);
                     crate::panels::caption_card(app, ui);
-                    crate::panels::adjust_card(app, ui);
                 },
             );
         }
@@ -286,6 +282,25 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                     crate::panels::film_card(app, ui);
                 },
             );
+        }
+
+        // Animate: what moves, how, and the button that makes the loop.
+        let (title, intro) = if is_video {
+            ("Freeze", "Select an area, choose whether it freezes or plays, then press Make loop.")
+        } else {
+            ("Animate", "Paint the area to animate, draw arrows in the direction of motion, then press Animate.")
+        };
+        if app.panel_visible("animate") {
+            drawer(app, ui, "drawer_animate", Icon::Sparkle, title, intro, |app, ui| {
+                region_card(app, ui);
+                if is_video {
+                    crate::panels::video_card(app, ui);
+                } else {
+                    motion_card(app, ui);
+                    loop_card(app, ui);
+                }
+                generate_block(app, ui);
+            });
         }
 
         // Export: saving.
@@ -1584,6 +1599,36 @@ pub fn crop_card(app: &mut StudioApp, ui: &mut egui::Ui) {
     rotate_row_card(app, ui);
 }
 
+/// Straighten: turn by any angle, -45° to 45°. Dragging redraws a quick
+/// preview with a grid; letting go finishes it as one undo step.
+fn straighten_row(app: &mut StudioApp, ui: &mut egui::Ui) {
+    let Some(sc) = &app.scene else { return };
+    let current = sc.angle;
+    let mut deg = current;
+    let ctx = ui.ctx().clone();
+    ui.horizontal(|ui| {
+        let r = ui
+            .add_enabled(
+                !app.busy(),
+                egui::Slider::new(&mut deg, -45.0..=45.0).text("Straighten").suffix("°").fixed_decimals(1).step_by(0.1),
+            )
+            .on_hover_text(
+                "Turn the picture by any angle (right is clockwise). It is zoomed in slightly so no \
+                 empty corners show. Straighten before painting: painted areas, arrows and the crop stay \
+                 where they are on the picture.",
+            );
+        if r.changed() && (deg - current).abs() > 1e-4 {
+            app.set_angle(&ctx, deg, r.dragged());
+        }
+        if r.drag_stopped() {
+            app.finish_angle(&ctx);
+        }
+        if reset_icon(ui, current == 0.0) {
+            app.set_angle(&ctx, 0.0, false);
+        }
+    });
+}
+
 /// Crop and rotate share one card: rotate buttons on top, then crop.
 fn rotate_row_card(app: &mut StudioApp, ui: &mut egui::Ui) {
     let Some(sc) = &app.scene else { return };
@@ -1593,7 +1638,7 @@ fn rotate_row_card(app: &mut StudioApp, ui: &mut egui::Ui) {
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            fold_title(ui, app, "crop", "Rotate & crop");
+            fold_title(ui, app, "crop", "Rotate, straighten & crop");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(!crop.is_full(), egui::Button::new("Reset crop").small())
@@ -1632,6 +1677,7 @@ fn rotate_row_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 }
             }
         });
+        straighten_row(app, ui);
         let active = app.tool == Tool::Crop && app.view == View::Edit;
         let color = if active { Color32::WHITE } else { theme::TEXT };
         let b = icons::button(Icon::Crop, egui::RichText::new(if active { "Cropping" } else { "Crop tool" }).color(color), color)

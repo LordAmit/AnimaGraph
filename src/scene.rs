@@ -20,8 +20,9 @@ pub struct Snapshot {
     pins: Vec<[f32; 2]>,
     crop: crate::crop::CropRect,
     aspect: crate::crop::Aspect,
-    /// Colour settings (Edit, presets, film), so they undo too.
+    /// Colour settings (Edit, presets, film) and masks, so they undo too.
     look: crate::finish::Look,
+    masks: Vec<crate::mask::Mask>,
 }
 
 /// One undo step: a saved state, a quarter turn (undone by turning back),
@@ -71,6 +72,9 @@ pub struct Edits {
     pub look: crate::finish::Look,
     pub border: crate::border::Border,
     pub caption: crate::caption::Caption,
+    /// Local edits (still photos). The current file's masks are edited
+    /// here directly; the window does not keep a copy.
+    pub masks: Vec<crate::mask::Mask>,
 }
 
 static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -302,6 +306,7 @@ impl Scene {
         }
         self.mask = mask;
         self.full = turn(&self.full);
+        self.edits.masks = self.edits.masks.iter().map(|m| m.turned(clockwise)).collect();
         self.work = turn(&self.work);
         // The picture before straightening turns too (turns and the angle
         // can be applied in any order).
@@ -358,6 +363,7 @@ impl Scene {
             crop: self.crop,
             aspect: self.aspect,
             look: self.edits.look,
+            masks: self.edits.masks.clone(),
         }
     }
 
@@ -372,6 +378,7 @@ impl Scene {
         self.crop = s.crop;
         self.aspect = s.aspect;
         self.edits.look = s.look;
+        self.edits.masks = s.masks;
         self.mask_version += 1;
     }
 

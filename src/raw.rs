@@ -13,8 +13,8 @@ pub const EXTENSIONS: [&str; 22] = [
 ];
 
 /// Other formats the app reads through the same system converter
-/// (iPhone photos).
-pub const SYSTEM_FORMATS: [&str; 2] = ["heic", "heif"];
+/// (iPhone photos, AVIF).
+pub const SYSTEM_FORMATS: [&str; 3] = ["heic", "heif", "avif"];
 
 /// RAW or HEIC: needs the system converter.
 pub fn needs_system_decoder(path: &Path) -> bool {
@@ -54,10 +54,13 @@ pub fn decode(path: &Path) -> Result<RgbaImage, String> {
             .map_err(|e| format!("Could not start the RAW converter: {e}"))?;
         if !out.status.success() || !tmp.exists() {
             let _ = std::fs::remove_file(&tmp);
-            return Err(
+            return Err(if is_raw(path) {
                 "macOS could not develop this RAW file. Its camera may be newer than this version of macOS supports."
-                    .into(),
-            );
+                    .into()
+            } else {
+                "macOS could not read this file. It may be damaged, or use a variant this version of macOS does not support."
+                    .into()
+            });
         }
         let img = crate::app::open_upright(&tmp).map_err(|e| e.to_string());
         let _ = std::fs::remove_file(&tmp);
@@ -66,7 +69,7 @@ pub fn decode(path: &Path) -> Result<RgbaImage, String> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = path;
-        Err("RAW files can be opened on macOS only. Convert it to JPEG or TIFF first.".into())
+        Err("RAW, HEIC and AVIF files can be opened on macOS only. Convert it to JPEG or TIFF first.".into())
     }
 }
 

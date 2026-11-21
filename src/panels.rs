@@ -9,7 +9,7 @@ use crate::theme;
 use crate::app::defaults;
 
 /// Clickable card title with a chevron; clicking folds or unfolds the card.
-fn fold_title(ui: &mut egui::Ui, app: &mut StudioApp, key: &str, title: &str) {
+pub(crate) fn fold_title(ui: &mut egui::Ui, app: &mut StudioApp, key: &str, title: &str) {
     let open = !app.prefs.collapsed.contains(key);
     let icon = if open { Icon::ChevronDown } else { Icon::ChevronRight };
     let b = egui::Button::image_and_text(
@@ -26,12 +26,12 @@ fn fold_title(ui: &mut egui::Ui, app: &mut StudioApp, key: &str, title: &str) {
     }
 }
 
-fn is_open(app: &StudioApp, key: &str) -> bool {
+pub(crate) fn is_open(app: &StudioApp, key: &str) -> bool {
     !app.prefs.collapsed.contains(key)
 }
 
 /// Every panel the View menu can show or hide: (key, name).
-pub const PANELS: [(&str, &str); 18] = [
+pub const PANELS: [(&str, &str); 19] = [
     ("scope", "Vectorscope"),
     ("region", "Moving region / selected area"),
     ("motion", "Motion"),
@@ -49,6 +49,7 @@ pub const PANELS: [(&str, &str); 18] = [
     ("adj_curve", "Tone curve"),
     ("adj_hsl", "HSL / Color"),
     ("adj_grade", "Color grading"),
+    ("masks", "Masks"),
     ("export", "Export"),
 ];
 
@@ -311,6 +312,7 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                         app.apply_edits_to_targets();
                     }
                     crate::panels::adjust_card(app, ui);
+                    crate::mask_panel::masks_card(app, ui);
                 },
             );
         }
@@ -1672,7 +1674,7 @@ fn edit_section(
 }
 
 /// A slider shown as whole numbers (value × `scale`), like -100..100.
-fn pct<'a>(v: &'a mut f32, lo: f32, hi: f32, text: &str, scale: f64) -> egui::Slider<'a> {
+pub(crate) fn pct<'a>(v: &'a mut f32, lo: f32, hi: f32, text: &str, scale: f64) -> egui::Slider<'a> {
     egui::Slider::new(v, lo..=hi)
         .text(text)
         .custom_formatter(move |x, _| format!("{:.0}", x * scale))
@@ -2426,7 +2428,7 @@ fn font_picker(app: &mut StudioApp, ui: &mut egui::Ui) {
 }
 
 /// Eyedropper toggle shown next to a color picker.
-fn eyedropper_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
+pub(crate) fn eyedropper_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
     let tint = if active { Color32::WHITE } else { theme::TEXT };
     let b = egui::Button::image(Icon::Eyedropper.image(15.0, tint))
         .fill(if active { theme::ACCENT } else { theme::PANEL })

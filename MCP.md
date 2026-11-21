@@ -44,11 +44,13 @@ assistant starts Animagraph.
 | `allowed_folders` | Lists the folders it may use |
 | `open_image` | Opens a photo (JPEG, PNG, HEIC, RAW) and returns an id |
 | `list_open_images` | Photos open in this session |
+| `import_preset` | Imports a Lightroom preset (`.xmp`, or a `.dng` preset from Lightroom mobile) from an allowed folder |
 | `list_styles` | Names of your imported Lightroom presets, the built-in looks and the film simulations |
 | `apply_style` | Applies one of those by name (film simulations take a strength) |
 | `set_adjustments` | Exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, vibrance, saturation, texture, clarity, dehaze, sharpening, fade, vignette, grain, S-curve, in the same units as the app; also the tone curve (all, red, green, blue), HSL per colour band, colour grading wheels and finer details (vignette shape, grain size, split toning), in the layout `get_settings` reports |
 | `reset_adjustments` | Removes all colour changes |
 | `set_framing` | Quarter turns, straighten, crop ratio, border (style, thickness, colour, rounded corners, corner mounts, Polaroid strip) and caption (text, font, size, colour, place, alignment, on the picture or in the border) |
+| `list_masks`, `add_mask`, `set_mask`, `remove_mask` | Masks for local edits: add a linear, radial or sky mask, place it (positions are 0 to 1 of the picture), narrow it to a brightness or colour range, set its own adjustments, list and remove masks. Brush masks are painted in the window |
 | `get_settings` | All current settings of a photo: sliders, tone curve, HSL, colour grading, details and framing |
 | `preview` | A small picture of the result for the assistant to look at |
 | `save_image` | Saves the finished photo as `.heic`, `.jpg` or `.png`, at full size or a chosen size |

@@ -25,6 +25,7 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         app.update_live(&ctx, dt)
     };
+    crate::mask_canvas::refresh_overlay(app, &ui.ctx().clone());
     let Some(scene) = &app.scene else { return };
 
     // What part of the picture is shown: everything while cropping (or with
@@ -140,7 +141,7 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
             if let Some(t) = base {
                 painter.image(t.id(), img_rect, uv, Color32::WHITE);
             }
-            if app.show_mask && !crop_tool && compare == Compare::Edited {
+            if app.show_mask && app.mask_edit.is_none() && !crop_tool && compare == Compare::Edited {
                 if let Some(t) = &app.mask_tex {
                     painter.image(t.id(), img_rect, uv, Color32::WHITE);
                 }
@@ -241,6 +242,10 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
         draw_crop_guide(&painter, full_rect, showing_clip_crop.unwrap_or(scene.crop), crop_tool);
     }
     let painter = painter.with_clip_rect(img_rect.intersect(area));
+    // The mask being edited: overlay, guides and handles.
+    if app.mask_edit.is_some() && app.view == View::Edit && compare == Compare::Edited && !crop_tool {
+        crate::mask_canvas::draw(app, &painter, full_rect, response.hover_pos());
+    }
     if is_live {
         let badge = Rect::from_min_size(img_rect.left_top() + Vec2::new(10.0, 10.0), Vec2::new(54.0, 20.0));
         painter.rect_filled(badge, CornerRadius::same(6), Color32::from_black_alpha(160));
@@ -256,7 +261,7 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
 
     let editing = app.view == View::Edit;
     let is_video = scene.is_video();
-    if editing && app.show_hints && !is_video && app.tool != Tool::Crop && compare == Compare::Edited {
+    if editing && app.show_hints && app.mask_edit.is_none() && !is_video && app.tool != Tool::Crop && compare == Compare::Edited {
         draw_hints(&painter, &scene.arrows, &scene.pins, &to_screen, scale);
     }
 
@@ -289,6 +294,7 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
                             app.border.enabled = true;
                         }
                         PickTarget::Caption => app.caption.color = c,
+                        PickTarget::MaskColor => app.mask_pick = Some(c),
                     }
                     app.picking = None;
                     app.status = format!("Picked color #{:02X}{:02X}{:02X}.", c[0], c[1], c[2]);
@@ -311,6 +317,8 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
         }
     } else if compare == Compare::Original {
         // Looking only: no editing on the original.
+    } else if editing && app.mask_edit.is_some() && !crop_tool {
+        crate::mask_canvas::interact(app, &response, full_rect, ui);
     } else if editing {
         interact_edit(app, &response, &to_norm, full_rect, scale);
         if app.tool == Tool::Crop && (response.drag_stopped() || response.double_clicked()) {

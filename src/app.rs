@@ -59,6 +59,8 @@ pub enum Compare {
 pub enum PickTarget {
     Border,
     Caption,
+    /// The colour range of the mask being edited.
+    MaskColor,
 }
 
 /// What a drag on the crop box is doing.
@@ -246,6 +248,10 @@ pub struct StudioApp {
     pub arrow_len: f32,
     pub crop_before: Option<CropRect>,
     photo_look: Option<Look>,
+    /// Masks the shown still was drawn with.
+    photo_masks: Vec<crate::mask::Mask>,
+    /// Masks at the last undo step, with the file they belong to.
+    masks_committed: Option<(u64, Vec<crate::mask::Mask>)>,
     /// The look at the last undo step, with the file it belongs to.
     look_committed: Option<(u64, Look)>,
     /// Straighten angle when the current change started (for undo).
@@ -270,6 +276,19 @@ pub struct StudioApp {
     pub layout_format: Format,
     /// An imported preset waiting for the person to confirm its deletion.
     pub preset_to_delete: Option<crate::presets::Preset>,
+    /// The mask being edited (index into the current file's masks): the
+    /// canvas then paints or moves that mask.
+    pub mask_edit: Option<usize>,
+    /// Paint (false) or erase (true) a brush mask; show the mask overlay.
+    pub mask_erase: bool,
+    /// A colour picked on the canvas for the mask's colour range.
+    pub mask_pick: Option<[u8; 3]>,
+    pub mask_overlay: bool,
+    /// The selected mask's overlay texture and what it was drawn from.
+    pub mask_overlay_tex: Option<TextureHandle>,
+    pub mask_overlay_of: Option<crate::mask::Mask>,
+    /// A gradient handle being dragged (see mask_canvas).
+    pub mask_handle: Option<crate::mask_canvas::Handle>,
     /// The "Assistant access (MCP)" window is open.
     pub mcp_window_open: bool,
     /// Tool calls from an assistant in live mode (none when another window
@@ -384,6 +403,8 @@ impl StudioApp {
             arrow_len: defaults::ARROW_LEN,
             crop_before: None,
             photo_look: None,
+            photo_masks: Vec::new(),
+            masks_committed: None,
             look_committed: None,
             angle_from: None,
             straightening: false,
@@ -398,6 +419,13 @@ impl StudioApp {
             layout_size: 3000,
             layout_format: if Format::default_export().is_still() { Format::default_export() } else { Format::Png },
             preset_to_delete: None,
+            mask_edit: None,
+            mask_erase: false,
+            mask_pick: None,
+            mask_overlay: true,
+            mask_overlay_tex: None,
+            mask_overlay_of: None,
+            mask_handle: None,
             mcp_window_open: false,
             live_rx: None,
             scope_tex: None,
@@ -564,6 +592,12 @@ impl StudioApp {
         self.look = edits.look;
         self.border = edits.border;
         self.caption = edits.caption.clone();
+        // Show the edited still, where every change is visible.
+        self.view = View::Edit;
+        // A mask removed from outside can no longer be the one being edited.
+        if self.mask_edit.is_some_and(|i| i >= edits.masks.len()) {
+            self.mask_edit = None;
+        }
         if framing_changed {
             self.after_turn(ctx);
         } else {
@@ -573,9 +607,10 @@ impl StudioApp {
 
     /// Keep the current look, border and caption with the current file.
     fn save_edits_to_scene(&mut self) {
-        let edits = crate::scene::Edits { look: self.look, border: self.border, caption: self.caption.clone() };
         if let Some(s) = &mut self.scene {
-            s.edits = edits;
+            s.edits.look = self.look;
+            s.edits.border = self.border;
+            s.edits.caption = self.caption.clone();
         }
     }
 
@@ -650,6 +685,7 @@ impl StudioApp {
     }
 
     fn show_scene(&mut self, _ctx: &egui::Context, scene: Scene) {
+        self.mask_edit = None;
         self.look = scene.edits.look;
         self.border = scene.edits.border;
         self.caption = scene.edits.caption.clone();
@@ -749,6 +785,8 @@ impl StudioApp {
                 close = true;
             }
         });
+        ctx.move_to_top(modal.backdrop_response.layer_id);
+        ctx.move_to_top(modal.response.layer_id);
         if close || modal.should_close() {
             self.error = None;
         }
@@ -782,6 +820,8 @@ impl StudioApp {
                 }
             });
         });
+        ctx.move_to_top(modal.backdrop_response.layer_id);
+        ctx.move_to_top(modal.response.layer_id);
         if modal.should_close() {
             self.pending_open = None;
         }
@@ -934,7 +974,8 @@ impl StudioApp {
         let sharp = size != crate::scene::WORK_SIZE && !scene.full_outdated;
         let fast = sharp && (self.look_preview.is_some() || ctx.input(|i| i.pointer.any_down()));
         let rebuild_base = self.photo_look.is_none() || self.raw_tex.is_none() || self.still_base_size != Some(size);
-        if self.photo_tex.is_some() && !rebuild_base && self.photo_look == Some(shown) && !(self.photo_fast && !fast) {
+        let masks_same = self.photo_masks == scene.edits.masks;
+        if self.photo_tex.is_some() && !rebuild_base && self.photo_look == Some(shown) && masks_same && !(self.photo_fast && !fast) {
             return;
         }
         if rebuild_base {
@@ -957,6 +998,8 @@ impl StudioApp {
             _ => scene.work.clone(),
         };
         crate::finish::apply_look(&mut img, &shown);
+        crate::mask::apply_masks(&mut img, &scene.edits.masks);
+        self.photo_masks = scene.edits.masks.clone();
         let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
         match &mut self.photo_tex {
             Some(t) => t.set(color, TextureOptions::LINEAR),
@@ -1086,7 +1129,15 @@ impl StudioApp {
     /// A file's scene and its edits (the current file's edits live in the app).
     fn scene_and_edits(&self, id: u64) -> Option<(&Scene, crate::scene::Edits)> {
         if let Some(s) = self.scene.as_ref().filter(|s| s.id == id) {
-            return Some((s, crate::scene::Edits { look: self.look, border: self.border, caption: self.caption.clone() }));
+            return Some((
+                s,
+                crate::scene::Edits {
+                    look: self.look,
+                    border: self.border,
+                    caption: self.caption.clone(),
+                    masks: s.edits.masks.clone(),
+                },
+            ));
         }
         self.files.iter().filter_map(|f| f.scene.as_ref()).find(|s| s.id == id).map(|s| (s, s.edits.clone()))
     }
@@ -1293,10 +1344,14 @@ impl StudioApp {
         if turned {
             self.after_turn(ctx);
         }
-        // Colour settings come back with the step.
+        // Colour settings and masks come back with the step.
         if let Some(s) = &self.scene {
             self.look = s.edits.look;
             self.look_committed = Some((s.id, self.look));
+            self.masks_committed = Some((s.id, s.edits.masks.clone()));
+            if self.mask_edit.is_some_and(|i| i >= s.edits.masks.len()) {
+                self.mask_edit = None;
+            }
         }
         // Loops made from this file follow its crop.
         if let Some(c) = self.scene.as_ref().map(|s| s.crop) {
@@ -1326,6 +1381,19 @@ impl StudioApp {
             _ => self.look_committed = Some((scene.id, look)),
         }
         scene.edits.look = look;
+        // Masks: one undo step per finished change too.
+        match &self.masks_committed {
+            Some((id, old)) if *id == scene.id => {
+                if *old != scene.edits.masks && !busy {
+                    let now = scene.edits.masks.clone();
+                    scene.edits.masks = old.clone();
+                    scene.checkpoint();
+                    scene.edits.masks = now;
+                    self.masks_committed = Some((scene.id, scene.edits.masks.clone()));
+                }
+            }
+            _ => self.masks_committed = Some((scene.id, scene.edits.masks.clone())),
+        }
     }
 
     /// Redraw everything that shows the picture after a quarter turn.
@@ -1384,7 +1452,11 @@ impl StudioApp {
                     "Loaded {name}. Paint the part that should move, or use Auto-detect."
                 );
             }
-            Err(e) => self.status = format!("Could not open that file: {e}"),
+            Err(e) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                self.status = format!("Could not open {name}.");
+                self.error = Some(unreadable_message(path, &e.to_string()));
+            }
         }
     }
 
@@ -1991,6 +2063,7 @@ impl StudioApp {
 pub(crate) fn framed_still(full: &RgbaImage, crop: CropRect, edits: &crate::scene::Edits, long: u32) -> RgbaImage {
     let mut img = crate::scene::downscale(full, long);
     crate::finish::apply_look(&mut img, &edits.look);
+    crate::mask::apply_masks(&mut img, &edits.masks);
     let overlay = caption_overlay(&edits.caption, crop, &img, &edits.border);
     finish_frame(&img, crop, &overlay, edits.border)
 }
@@ -2024,6 +2097,21 @@ fn finish_frame(
         crate::caption::blend(&mut out, c);
     }
     out
+}
+
+/// A plain explanation for a photo that could not be opened.
+fn unreadable_message(path: &std::path::Path, detail: &str) -> String {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let known = open_extensions().iter().any(|e| *e == ext);
+    if known {
+        format!("Could not open {name}. The file may be damaged or incomplete.\n\n({detail})")
+    } else {
+        format!(
+            "Animagraph cannot open .{ext} files ({name}).\n\nIt opens JPEG, PNG, HEIC, AVIF, TIFF, WebP and BMP photos, \
+             camera RAW files, GIFs and short videos. Convert the file to one of these and open it again."
+        )
+    }
 }
 
 /// Every file type the Open dialog offers.
@@ -2090,8 +2178,6 @@ impl eframe::App for StudioApp {
             self.prefs.save();
             self.prefs_saved = self.prefs.clone();
         }
-        self.pending_open_dialog(&ctx);
-        self.error_dialog(&ctx);
         if self.task.is_none() && !self.open_queue.is_empty() {
             let next = self.open_queue.remove(0);
             self.load_paths(&ctx, vec![next]);
@@ -2157,5 +2243,7 @@ impl eframe::App for StudioApp {
         // Dialogs drawn last, so they sit above the canvas's floating bars.
         crate::mcp_window::window(self, &ctx);
         crate::preset_dialog::confirm_delete(self, &ctx);
+        self.pending_open_dialog(&ctx);
+        self.error_dialog(&ctx);
     }
 }

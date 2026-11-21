@@ -201,6 +201,10 @@ impl Workspace for LiveWorkspace<'_> {
         result
     }
 
+    fn presets_changed(&mut self) {
+        self.app.lr_presets = crate::presets::list();
+    }
+
     fn close(&mut self, id: &str) -> Result<Value, String> {
         let i = self.index_of(id).ok_or_else(|| format!("No open file with id {id}."))?;
         self.app.remove_file(self.ctx, i);

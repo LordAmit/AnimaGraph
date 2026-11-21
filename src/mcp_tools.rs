@@ -26,6 +26,8 @@ pub trait Workspace {
     /// Change one photo: its picture and framing (scene) and its edits.
     fn edit(&mut self, id: &str, f: &mut dyn FnMut(&mut Scene, &mut Edits) -> Result<Value, String>) -> Result<Value, String>;
     fn close(&mut self, id: &str) -> Result<Value, String>;
+    /// The list of imported presets changed (the window shows the new list).
+    fn presets_changed(&mut self) {}
 }
 
 /// One photo opened by the assistant in the background.
@@ -100,6 +102,12 @@ impl Workspace for Session {
 
 /// Run one tool by name in a workspace.
 pub fn call(ws: &mut dyn Workspace, name: &str, args: &Value) -> Reply {
+    if let Some(r) = crate::mcp_masks::call(ws, name, args) {
+        return match r {
+            Ok(v) => Reply::ok(v),
+            Err(e) => Reply::error(e),
+        };
+    }
     let result = match name {
         "allowed_folders" => Ok(json!({
             "mode": ws.mode(),
@@ -119,6 +127,7 @@ pub fn call(ws: &mut dyn Workspace, name: &str, args: &Value) -> Reply {
         "preview" => return preview(ws, args),
         "save_image" => save_image(ws, args),
         "close_image" => str_arg(args, "image_id").and_then(|id| ws.close(&id)),
+        "import_preset" => import_preset(ws, args),
         _ => Err(format!("Unknown tool: {name}")),
     };
     match result {
@@ -134,6 +143,16 @@ fn with_doc(
 ) -> Result<Value, String> {
     let id = str_arg(args, "image_id")?;
     ws.edit(&id, f)
+}
+
+/// Copy a Lightroom preset (.xmp, or a .dng preset from Lightroom mobile)
+/// from an allowed folder into Animagraph's presets, as the Import button does.
+fn import_preset(ws: &mut dyn Workspace, args: &Value) -> Result<Value, String> {
+    let path = PathBuf::from(str_arg(args, "path")?);
+    let real = crate::mcp_access::check_read(&path, &ws.folders())?;
+    let p = crate::presets::import(&real)?;
+    ws.presets_changed();
+    Ok(json!({"imported": p.name, "use_with": "apply_style"}))
 }
 
 /// Read a photo from an allowed folder (JPEG, PNG, HEIC, RAW...).
@@ -628,6 +647,14 @@ fn format_for(path: &Path) -> Result<Format, String> {
 
 /// Tool descriptions for tools/list.
 pub fn tool_list() -> Value {
+    let mut all = base_tool_list();
+    if let Some(a) = all.as_array_mut() {
+        a.extend(crate::mcp_masks::tool_list());
+    }
+    all
+}
+
+fn base_tool_list() -> Value {
     let id = json!({"type": "string", "description": "Id from open_image, such as img1"});
     let num = |d: &str| json!({"type": "number", "description": d});
     let color = |d: &str| json!({"type": "string", "description": format!("{d}, written like #f4f0e8")});
@@ -678,6 +705,8 @@ pub fn tool_list() -> Value {
          "inputSchema": {"type": "object", "properties": {"image_id": id, "long_side": num("Pixels on the longest side, 128 to 2048, default 768")}, "required": ["image_id"]}},
         {"name": "save_image", "description": "Save the finished photo into an allowed folder. The format follows the extension: .heic, .jpg or .png.",
          "inputSchema": {"type": "object", "properties": {"image_id": id, "path": {"type": "string", "description": "Full path to save to"}, "long_side": num("Pixels on the longest side; leave out for full size")}, "required": ["image_id", "path"]}},
+        {"name": "import_preset", "description": "Import a Lightroom preset (.xmp file, or a .dng preset from Lightroom mobile) from an allowed folder. It is copied into Animagraph's presets and can then be used with apply_style.",
+         "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "Full path of the .xmp or .dng preset"}}, "required": ["path"]}},
         {"name": "close_image", "description": "Close an open photo and forget its settings.",
          "inputSchema": {"type": "object", "properties": {"image_id": id}, "required": ["image_id"]}}
     ])

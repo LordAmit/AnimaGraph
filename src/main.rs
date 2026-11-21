@@ -8,6 +8,7 @@ mod automask;
 mod border;
 mod canvas;
 mod caption;
+mod corners;
 mod crop;
 mod icons;
 mod layout;

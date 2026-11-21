@@ -1938,6 +1938,35 @@ pub fn border_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                     app.status = "Click the picture to pick a color (Esc to cancel).".into();
                 }
             });
+            // Photo corners: rounded, and paper corner mounts.
+            ui.label(egui::RichText::new("Photo corners").size(12.0).color(theme::TEXT_DIM));
+            with_reset!(
+                ui,
+                b.radius,
+                0.0,
+                egui::Slider::new(&mut b.radius, 0.0..=0.25)
+                    .text("Rounded")
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                    .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+            );
+            ui.checkbox(&mut b.mounts, "Corner mounts")
+                .on_hover_text("Small paper triangles holding the photo at its corners, as in a photo album");
+            if b.mounts {
+                with_reset!(
+                    ui,
+                    b.mount_size,
+                    crate::border::DEFAULT_MOUNT_SIZE,
+                    egui::Slider::new(&mut b.mount_size, 0.03..=0.25)
+                        .text("Mount size")
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                        .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Mount color");
+                    color_swatches(ui, &mut b.mount_color, &app.palette);
+                    ui.color_edit_button_srgb(&mut b.mount_color).on_hover_text("Any color");
+                });
+            }
             ui.label(egui::RichText::new("Output shape").size(12.0).color(theme::TEXT_DIM));
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);

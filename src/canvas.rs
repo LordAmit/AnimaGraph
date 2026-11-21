@@ -147,6 +147,10 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
             }
         }
     }
+    // Rounded photo corners and corner mounts, as they will be saved.
+    if border.enabled && !crop_tool {
+        draw_photo_corners(&painter, img_rect, &border);
+    }
     // Grid while straightening, to line up horizons and walls.
     if app.straightening {
         let stroke = Stroke::new(1.0, Color32::from_white_alpha(110));
@@ -778,6 +782,51 @@ fn draw_crop_guide(painter: &egui::Painter, img_rect: Rect, crop: CropRect, hand
     ] {
         painter.line_segment([c, c + Vec2::new(dx * len, 0.0)], grip);
         painter.line_segment([c, c + Vec2::new(0.0, dy * len)], grip);
+    }
+}
+
+/// Preview of the photo corners inside the border: the border colour fills
+/// in around rounded corners, then the paper mounts go on top.
+fn draw_photo_corners(painter: &egui::Painter, photo: Rect, border: &crate::border::Border) {
+    let short = photo.width().min(photo.height());
+    let [r, g, b] = border.color;
+    let bg = Color32::from_rgb(r, g, b);
+    let radius = (border.radius.max(0.0) * short).min(short / 2.0);
+    if radius > 0.5 {
+        let corners = [
+            (photo.left_top(), Vec2::new(1.0, 1.0)),
+            (photo.right_top(), Vec2::new(-1.0, 1.0)),
+            (photo.left_bottom(), Vec2::new(1.0, -1.0)),
+            (photo.right_bottom(), Vec2::new(-1.0, -1.0)),
+        ];
+        for (c, inward) in corners {
+            // Fan from the corner point to the quarter circle.
+            let centre = c + inward * radius;
+            let mut mesh = egui::Mesh::default();
+            mesh.colored_vertex(c, bg);
+            let steps = 16;
+            for i in 0..=steps {
+                let t = std::f32::consts::FRAC_PI_2 * i as f32 / steps as f32;
+                let p = centre - Vec2::new(inward.x * t.cos(), inward.y * t.sin()) * radius;
+                mesh.colored_vertex(p, bg);
+            }
+            for i in 1..=steps as u32 {
+                mesh.add_triangle(0, i, i + 1);
+            }
+            painter.add(egui::Shape::mesh(mesh));
+        }
+    }
+    if border.mounts {
+        let rect = [photo.min.x, photo.min.y, photo.width(), photo.height()];
+        let [mr, mg, mb] = border.mount_color;
+        let fill = Color32::from_rgb(mr, mg, mb);
+        let edge = Stroke::new(1.0, Color32::from_white_alpha(40));
+        for t in crate::corners::mount_triangles(rect, border.mount_size.max(0.0) * short) {
+            let pts: Vec<Pos2> = t.iter().map(|p| Pos2::new(p[0], p[1])).collect();
+            painter.add(egui::Shape::convex_polygon(pts.clone(), fill, Stroke::NONE));
+            // A faint light line along the long side, like a paper edge.
+            painter.line_segment([pts[1], pts[2]], edge);
+        }
     }
 }
 

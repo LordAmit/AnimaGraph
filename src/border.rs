@@ -65,7 +65,17 @@ pub struct Border {
     /// Polaroid: output height ÷ width to reach. When set, the bottom strip
     /// is sized to reach it and `bottom` is not used.
     pub target: Option<f32>,
+    /// Rounded photo corners: radius as a fraction of the photo's shorter side.
+    pub radius: f32,
+    /// Paper corner mounts holding the photo, their length along each edge
+    /// (fraction of the photo's shorter side) and colour.
+    pub mounts: bool,
+    pub mount_size: f32,
+    pub mount_color: [u8; 3],
 }
+
+pub const DEFAULT_MOUNT_SIZE: f32 = 0.1;
+pub const DEFAULT_MOUNT_COLOR: [u8; 3] = [28, 28, 30];
 
 pub const DEFAULT_SIZE: f32 = 0.05;
 
@@ -78,6 +88,10 @@ impl Default for Border {
             fit: BorderFit::Even,
             bottom: POLAROID_BOTTOM,
             target: None,
+            radius: 0.0,
+            mounts: false,
+            mount_size: DEFAULT_MOUNT_SIZE,
+            mount_color: DEFAULT_MOUNT_COLOR,
         }
     }
 }
@@ -148,6 +162,7 @@ impl Border {
         let [r, g, b] = self.color;
         let mut out = RgbaImage::from_pixel(ow.max(w), oh.max(h), Rgba([r, g, b, 255]));
         image::imageops::replace(&mut out, img, ox, oy);
+        crate::corners::apply(&mut out, [ox as f32, oy as f32, w as f32, h as f32], self);
         out
     }
 }
@@ -217,6 +232,20 @@ mod tests {
         b.target = Some(0.8);
         assert!(!b.polaroid_target_reached(400.0, 600.0));
         assert!((b.polaroid_bottom(400.0, 600.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rounded_corners_and_mounts_are_drawn_in_the_border() {
+        let photo = RgbaImage::from_pixel(200, 100, Rgba([0, 0, 0, 255]));
+        let b = Border { enabled: true, size: 0.1, radius: 0.2, ..Border::default() };
+        let out = b.apply(&photo);
+        // Photo starts at (10, 10); its very corner is now border colour.
+        assert_eq!(out.get_pixel(10, 10)[0], 255);
+        assert_eq!(out.get_pixel(110, 60)[0], 0);
+        let m = Border { radius: 0.0, mounts: true, mount_color: [200, 0, 0], ..b };
+        let out = m.apply(&photo);
+        assert_eq!(out.get_pixel(11, 11).0[..3], [200, 0, 0]);
+        assert_eq!(out.get_pixel(110, 60)[0], 0);
     }
 
     #[test]

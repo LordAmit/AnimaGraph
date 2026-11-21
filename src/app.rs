@@ -270,6 +270,11 @@ pub struct StudioApp {
     pub layout_format: Format,
     /// An imported preset waiting for the person to confirm its deletion.
     pub preset_to_delete: Option<crate::presets::Preset>,
+    /// The "Assistant access (MCP)" window is open.
+    pub mcp_window_open: bool,
+    /// Tool calls from an assistant in live mode (none when another window
+    /// already serves them).
+    pub live_rx: Option<std::sync::mpsc::Receiver<crate::mcp_live::LiveRequest>>,
     /// Vectorscope trace, what it was drawn from, and its zoom (1 or 2).
     pub scope_tex: Option<TextureHandle>,
     pub scope_key: u64,
@@ -393,6 +398,8 @@ impl StudioApp {
             layout_size: 3000,
             layout_format: if Format::default_export().is_still() { Format::default_export() } else { Format::Png },
             preset_to_delete: None,
+            mcp_window_open: false,
+            live_rx: None,
             scope_tex: None,
             scope_key: 0,
             scope_zoom: 1.0,
@@ -434,6 +441,10 @@ impl StudioApp {
         }
         if app.screenshot.is_some() && app.scene.is_some() {
             app.start_preview(&cc.egui_ctx);
+        }
+        // Live mode for assistants (not for the check screenshots).
+        if app.screenshot.is_none() || crate::mcp_live::test_socket_set() {
+            app.live_rx = crate::mcp_live::start_listener(cc.egui_ctx.clone());
         }
         app
     }
@@ -542,6 +553,24 @@ impl StudioApp {
     }
 
     /// Show a scene on the canvas.
+    /// For live mode: the current file's edits into its scene.
+    pub fn sync_edits_to_scene(&mut self) {
+        self.save_edits_to_scene();
+    }
+
+    /// For live mode: show edits made to the current file from outside, and
+    /// redraw the picture (fully when its framing changed).
+    pub fn show_edits(&mut self, ctx: &egui::Context, edits: &crate::scene::Edits, framing_changed: bool) {
+        self.look = edits.look;
+        self.border = edits.border;
+        self.caption = edits.caption.clone();
+        if framing_changed {
+            self.after_turn(ctx);
+        } else {
+            self.photo_look = None;
+        }
+    }
+
     /// Keep the current look, border and caption with the current file.
     fn save_edits_to_scene(&mut self) {
         let edits = crate::scene::Edits { look: self.look, border: self.border, caption: self.caption.clone() };
@@ -1959,7 +1988,7 @@ impl StudioApp {
 
 /// A file's finished still: colour edits, then crop, caption and border,
 /// from a picture made no larger than `long` on its longest side.
-fn framed_still(full: &RgbaImage, crop: CropRect, edits: &crate::scene::Edits, long: u32) -> RgbaImage {
+pub(crate) fn framed_still(full: &RgbaImage, crop: CropRect, edits: &crate::scene::Edits, long: u32) -> RgbaImage {
     let mut img = crate::scene::downscale(full, long);
     crate::finish::apply_look(&mut img, &edits.look);
     let overlay = caption_overlay(&edits.caption, crop, &img, &edits.border);
@@ -2032,6 +2061,7 @@ impl eframe::App for StudioApp {
         let ctx = ui.ctx().clone();
         self.poll_task(&ctx);
         self.handle_dropped_files(&ctx);
+        crate::mcp_live::handle_requests(self, &ctx);
         self.track_look_undo(&ctx);
         // A straighten drag that ended without the slider noticing.
         if self.straightening && !ctx.input(|i| i.pointer.any_down()) {
@@ -2125,6 +2155,7 @@ impl eframe::App for StudioApp {
                 }
             });
         // Dialogs drawn last, so they sit above the canvas's floating bars.
+        crate::mcp_window::window(self, &ctx);
         crate::preset_dialog::confirm_delete(self, &ctx);
     }
 }

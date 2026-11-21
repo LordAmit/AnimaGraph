@@ -221,6 +221,14 @@ fn view_menu(app: &mut StudioApp, ui: &mut egui::Ui) {
         ui.separator();
         still_view_choice(ui, app);
         ui.separator();
+        if ui
+            .button("Assistant access (MCP)…")
+            .on_hover_text("Let an assistant such as Claude edit and save photos with Animagraph")
+            .clicked()
+        {
+            app.mcp_window_open = true;
+        }
+        ui.separator();
         if ui.button("Show everything").clicked() {
             app.prefs.hidden.clear();
         }

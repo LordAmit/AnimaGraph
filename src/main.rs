@@ -18,6 +18,11 @@ mod layout_view;
 mod lr_match;
 #[cfg(target_os = "macos")]
 mod macvideo;
+mod mcp_access;
+mod mcp_live;
+mod mcp_server;
+mod mcp_tools;
+mod mcp_window;
 #[cfg(target_os = "macos")]
 mod macexport;
 mod develop;
@@ -48,6 +53,10 @@ fn main() -> eframe::Result<()> {
     // `--write-iconset <folder>`: write the app icon images and quit
     // (used by make-mac-app.sh to build the .app icon).
     let args: Vec<String> = std::env::args().collect();
+    // `--mcp`: background mode for assistants (local MCP server, no window).
+    if args.iter().any(|a| a == "--mcp") {
+        std::process::exit(mcp_server::run());
+    }
     if let Some(i) = args.iter().position(|a| a == "--write-iconset") {
         let Some(dir) = args.get(i + 1) else {
             eprintln!("Usage: --write-iconset <folder>");

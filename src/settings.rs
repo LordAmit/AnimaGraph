@@ -17,6 +17,11 @@ pub struct Prefs {
     pub still_view: u32,
     /// Convert Apple Log videos to normal colours when they are opened.
     pub convert_log: bool,
+    /// Folders an assistant may read and write through MCP (empty: the
+    /// default folders, see mcp_access).
+    pub mcp_folders: Vec<String>,
+    /// Let an assistant work in the open window (live mode).
+    pub mcp_live: bool,
 }
 
 /// Choices for the still photo's view quality: (long side, label).
@@ -35,6 +40,8 @@ impl Default for Prefs {
             caption_font: String::new(),
             still_view: crate::scene::WORK_SIZE,
             convert_log: true,
+            mcp_folders: Vec::new(),
+            mcp_live: true,
         }
     }
 }
@@ -62,6 +69,10 @@ impl Prefs {
                 "collapsed" => p.collapsed = parse_set(v),
                 "caption_font" => p.caption_font = v.trim().to_string(),
                 "convert_log" => p.convert_log = v.trim() != "0",
+                "mcp_live" => p.mcp_live = v.trim() != "0",
+                "mcp_folders" => {
+                    p.mcp_folders = v.split('|').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+                }
                 "still_view" => {
                     if let Ok(n) = v.trim().parse::<u32>() {
                         if STILL_VIEW_CHOICES.iter().any(|(c, _)| *c == n) {
@@ -78,12 +89,14 @@ impl Prefs {
     pub fn to_text(&self) -> String {
         let join = |s: &BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(",");
         format!(
-            "hidden={}\ncollapsed={}\ncaption_font={}\nstill_view={}\nconvert_log={}\n",
+            "hidden={}\ncollapsed={}\ncaption_font={}\nstill_view={}\nconvert_log={}\nmcp_folders={}\nmcp_live={}\n",
             join(&self.hidden),
             join(&self.collapsed),
             self.caption_font,
             self.still_view,
-            u8::from(self.convert_log)
+            u8::from(self.convert_log),
+            self.mcp_folders.join("|"),
+            u8::from(self.mcp_live)
         )
     }
 
@@ -109,6 +122,8 @@ mod tests {
         p.caption_font = "/x/y.ttf".into();
         p.still_view = 2560;
         p.convert_log = false;
+        p.mcp_folders = vec!["/a b/c".into(), "/d".into()];
+        p.mcp_live = false;
         assert_eq!(Prefs::parse(&p.to_text()), p);
     }
 }

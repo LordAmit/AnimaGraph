@@ -13,6 +13,9 @@ only part of the picture moves, played as a seamless loop.
 
 Everything runs on your own computer. Nothing is uploaded.
 
+An assistant such as Claude can also edit and save photos with Animagraph in
+the background: see [MCP.md](MCP.md).
+
 ## Use the ready-made app (macOS)
 
 1. Download `Animagraph-<version>-macos-<cpu>.zip` from the

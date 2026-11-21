@@ -88,19 +88,36 @@ pub fn save(format: Format, frames: &[RgbaImage], fps: u32, target: &Path, repea
     }
 }
 
-/// Save one picture as PNG or JPEG.
+/// Save one picture as PNG, JPEG or HEIC, labelled as sRGB (the colours
+/// Animagraph works in) so other apps show the same colours.
 pub fn save_still(format: Format, img: &RgbaImage, target: &Path) -> Result<PathBuf, String> {
     match format {
-        Format::Jpeg => {
-            let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
-            let file = std::fs::File::create(target).map_err(|e| e.to_string())?;
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92);
-            enc.encode_image(&rgb).map_err(|e| e.to_string())?;
-        }
+        Format::Jpeg => save_jpeg_srgb(img, target)?,
         Format::Heif => save_heif(img, target)?,
-        _ => img.save_with_format(target, image::ImageFormat::Png).map_err(|e| e.to_string())?,
+        _ => save_png_srgb(img, target)?,
     }
     Ok(target.to_path_buf())
+}
+
+/// PNG with an sRGB profile.
+fn save_png_srgb(img: &RgbaImage, target: &Path) -> Result<(), String> {
+    use image::ImageEncoder;
+    let file = std::fs::File::create(target).map_err(|e| e.to_string())?;
+    let mut enc = image::codecs::png::PngEncoder::new(std::io::BufWriter::new(file));
+    let _ = enc.set_icc_profile(crate::colour::srgb_icc());
+    enc.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
+        .map_err(|e| e.to_string())
+}
+
+/// JPEG (quality 92) with an sRGB profile.
+fn save_jpeg_srgb(img: &RgbaImage, target: &Path) -> Result<(), String> {
+    use image::ImageEncoder;
+    let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+    let file = std::fs::File::create(target).map_err(|e| e.to_string())?;
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92);
+    let _ = enc.set_icc_profile(crate::colour::srgb_icc());
+    enc.write_image(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+        .map_err(|e| e.to_string())
 }
 
 /// HEIF (.heic) through the encoder built into macOS.
@@ -108,7 +125,8 @@ fn save_heif(img: &RgbaImage, target: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let tmp = std::env::temp_dir().join(format!("animagraph_heif_{}.png", std::process::id()));
-        img.save_with_format(&tmp, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        // The sRGB profile in this PNG goes into the HEIC file.
+        save_png_srgb(img, &tmp)?;
         let out = Command::new("/usr/bin/sips")
             .args(["-s", "format", "heic", "-s", "formatOptions", "90"])
             .arg(&tmp)

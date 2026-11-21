@@ -165,16 +165,16 @@ pub fn look_from_xmp(xmp: &str) -> Look {
     l.whites = (get("Whites2012") / 100.0).clamp(-1.0, 1.0);
     l.blacks = (get("Blacks2012") / 100.0).clamp(-1.0, 1.0);
 
-    // Presence. Texture, sharpening and saturation strengths were set by
-    // comparing with a photo edited in Lightroom (Texture +25, Sharpening 50,
-    // Saturation -15): Lightroom's texture and sharpening are stronger and
-    // its saturation slider weaker than the app's controls of the same number.
+    // Presence. Texture, sharpening and vibrance strengths were set by
+    // comparing with photos exported from Lightroom (see lr_match.rs):
+    // Lightroom's texture, sharpening and vibrance are stronger than the
+    // app's controls of the same number.
     l.clarity = (get("Clarity2012") / 100.0).clamp(-1.0, 1.0);
     l.texture = (get("Texture") / 100.0 * 2.0).clamp(-1.0, 1.0);
     l.sharpen = (get("Sharpness") / 100.0).clamp(0.0, 1.0);
     l.dehaze = (get("Dehaze") / 100.0).clamp(-1.0, 1.0);
-    l.vibrance = (get("Vibrance") / 100.0).clamp(-1.0, 1.0);
-    l.saturation = (get("Saturation") / 100.0 * 0.5).clamp(-1.0, 1.0);
+    l.vibrance = (get("Vibrance") / 100.0 * 1.5).clamp(-1.0, 1.0);
+    l.saturation = (get("Saturation") / 100.0).clamp(-1.0, 1.0);
 
     // White balance: relative values for JPEG presets, absolute for RAW
     // presets. "As Shot" and "Auto" keep the photo's own white balance.
@@ -252,20 +252,15 @@ pub fn look_from_xmp(xmp: &str) -> Look {
     if let Some(rough) = num(xmp, "GrainFrequency") {
         l.grain_rough = (rough / 100.0).clamp(0.0, 1.0);
     }
-    // Lightroom's vignette is much stronger and starts nearer the center
-    // than the app's slider of the same number. Measured against a photo
-    // edited there: -20 with midpoint 45 and feather 60 darkens the corners
-    // by about a third, starting about a quarter of the way out.
-    let amount = -get("PostCropVignetteAmount") / 100.0;
-    l.vignette = if amount > 0.0 {
-        ((1.0 - (-2.4 * amount).exp()) / 0.65).min(1.0)
-    } else {
-        amount.max(-1.0)
-    };
+    // The vignette amount is the same number as the app's slider. Where it
+    // starts and how wide it is were measured against three photos exported
+    // from Lightroom (see lr_match.rs): it starts at about four fifths of
+    // the midpoint, as a share of the way to the corners.
+    l.vignette = (-get("PostCropVignetteAmount") / 100.0).clamp(-1.0, 1.0);
     let mid = num(xmp, "PostCropVignetteMidpoint").unwrap_or(50.0) / 100.0;
-    l.vignette_mid = ((0.62 * mid - 0.15) / 0.6).clamp(0.0, 1.0);
+    l.vignette_mid = ((0.79 * mid - 0.15) / 0.6).clamp(0.0, 1.0);
     if let Some(feather) = num(xmp, "PostCropVignetteFeather") {
-        l.vignette_feather = (feather / 100.0 + 0.07).clamp(0.0, 1.0);
+        l.vignette_feather = (0.95 * feather / 100.0).clamp(0.0, 1.0);
     }
     l.vignette_round = (get("PostCropVignetteRoundness") / 100.0).clamp(-1.0, 1.0);
     l
@@ -356,7 +351,7 @@ mod tests {
         assert!((l.highlights + 0.4).abs() < 1e-6);
         assert!((l.shadows - 0.3).abs() < 1e-6);
         assert!((l.warmth - 0.25).abs() < 1e-6);
-        assert!(l.saturation < 0.0 && l.grain > 0.0 && l.vignette > 0.0);
+        assert!((l.saturation + 0.15).abs() < 1e-6 && l.grain > 0.0 && l.vignette > 0.0);
         // Green hue +60 goes to the HSL green band.
         assert!((l.hsl[3][0] - 0.6).abs() < 1e-6);
         // The point curve is carried over exactly.
@@ -374,7 +369,8 @@ mod tests {
         // Strengths are calibrated against a photo edited in Lightroom.
         assert!((l.texture - 0.3).abs() < 1e-6 && (l.sharpen - 0.6).abs() < 1e-6);
         assert!((l.grain_rough - 0.7).abs() < 1e-6);
-        assert!((l.vignette_mid - 0.06).abs() < 1e-6 && (l.vignette_feather - 0.87).abs() < 1e-6);
+        assert!((l.vignette - 0.2).abs() < 1e-6, "{}", l.vignette);
+        assert!((l.vignette_mid - 0.145).abs() < 1e-6 && (l.vignette_feather - 0.76).abs() < 1e-6);
         assert!((l.vignette_round + 0.4).abs() < 1e-6);
     }
 

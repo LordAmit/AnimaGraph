@@ -268,6 +268,8 @@ pub struct StudioApp {
     pub layout_drag_saved: Option<crate::layout::Cell>,
     pub layout_size: u32,
     pub layout_format: Format,
+    /// An imported preset waiting for the person to confirm its deletion.
+    pub preset_to_delete: Option<crate::presets::Preset>,
     /// Vectorscope trace, what it was drawn from, and its zoom (1 or 2).
     pub scope_tex: Option<TextureHandle>,
     pub scope_key: u64,
@@ -390,6 +392,7 @@ impl StudioApp {
             layout_drag_saved: None,
             layout_size: 3000,
             layout_format: if Format::default_export().is_still() { Format::default_export() } else { Format::Png },
+            preset_to_delete: None,
             scope_tex: None,
             scope_key: 0,
             scope_zoom: 1.0,
@@ -2005,12 +2008,22 @@ fn open_extensions() -> Vec<&'static str> {
 }
 
 /// Open a photo and turn it upright using the orientation the camera saved.
+/// Open a photo upright and in sRGB: the orientation the camera saved is
+/// applied, and colours are converted from the photo's own profile (Display
+/// P3 on iPhones) to sRGB, the colours Animagraph edits and shows.
 pub(crate) fn open_upright(path: &std::path::Path) -> image::ImageResult<image::DynamicImage> {
     use image::ImageDecoder;
     let mut decoder = image::ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let icc = decoder.icc_profile().ok().flatten();
     let mut img = image::DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
+    if let Some(icc) = icc {
+        let mut rgba = img.to_rgba8();
+        if crate::colour::to_srgb(&mut rgba, &icc) {
+            img = image::DynamicImage::ImageRgba8(rgba);
+        }
+    }
     Ok(img)
 }
 
@@ -2111,5 +2124,7 @@ impl eframe::App for StudioApp {
                     crate::canvas::canvas(self, ui);
                 }
             });
+        // Dialogs drawn last, so they sit above the canvas's floating bars.
+        crate::preset_dialog::confirm_delete(self, &ctx);
     }
 }

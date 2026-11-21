@@ -1226,7 +1226,7 @@ pub fn lightroom_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             .map(|p| Tile {
                 key: format!("lr:{}", p.path.display()),
                 name: p.name.clone(),
-                note: "Right-click to remove".into(),
+                note: "Delete with the bin button or by right-clicking".into(),
                 look: p.look,
                 thumb_look: p.look,
                 removable: true,
@@ -1238,13 +1238,8 @@ pub fn lightroom_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 app.look = tiles[i].look;
                 app.status = format!("Applied the {} preset. Fine-tune it in Edit.", tiles[i].name);
             }
-            Some(TileAction::Remove(i)) => match crate::presets::remove(&app.lr_presets[i]) {
-                Ok(()) => {
-                    app.lr_presets = crate::presets::list();
-                    app.lr_choice = None;
-                }
-                Err(e) => app.status = e,
-            },
+            // Asks first (see preset_dialog).
+            Some(TileAction::Remove(i)) => app.preset_to_delete = app.lr_presets.get(i).cloned(),
             None => {}
         }
     });
@@ -1377,14 +1372,28 @@ fn tile_grid(app: &mut StudioApp, ui: &mut egui::Ui, tiles: &[Tile]) -> Option<T
                 if resp.hovered() {
                     app.hover_look = Some((t.look, t.name.clone()));
                 }
+                // Bin button on imported presets, shown on hover.
+                let mut bin_clicked = false;
+                if t.removable {
+                    let btn_rect = Rect::from_min_size(img_rect.right_top() + Vec2::new(-30.0, 4.0), Vec2::splat(26.0));
+                    if resp.hovered() || ui.rect_contains_pointer(btn_rect) {
+                        let btn = egui::Button::image(Icon::Trash.image(14.0, Color32::WHITE))
+                            .fill(Color32::from_black_alpha(170))
+                            .stroke(Stroke::NONE)
+                            .corner_radius(CornerRadius::same(6));
+                        bin_clicked = theme::overlay(ui, btn_rect, btn).on_hover_text("Delete this preset…").clicked();
+                    }
+                }
                 let tip = if t.note.is_empty() { t.name.clone() } else { format!("{}\n{}", t.name, t.note) };
                 let resp = resp.on_hover_text(tip);
-                if resp.clicked() {
+                if bin_clicked {
+                    action = Some(TileAction::Remove(i));
+                } else if resp.clicked() {
                     action = Some(TileAction::Apply(i));
                 }
                 if t.removable {
                     resp.context_menu(|ui| {
-                        if ui.button("Remove").clicked() {
+                        if ui.button("Delete preset…").clicked() {
                             action = Some(TileAction::Remove(i));
                             ui.close();
                         }

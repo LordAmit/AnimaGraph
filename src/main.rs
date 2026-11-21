@@ -8,11 +8,14 @@ mod automask;
 mod border;
 mod canvas;
 mod caption;
+mod colour;
 mod corners;
 mod crop;
 mod icons;
 mod layout;
 mod layout_view;
+#[cfg(test)]
+mod lr_match;
 #[cfg(target_os = "macos")]
 mod macvideo;
 #[cfg(target_os = "macos")]
@@ -26,6 +29,7 @@ mod fonts;
 mod motion;
 mod palette;
 mod panels;
+mod preset_dialog;
 mod presets;
 mod raw;
 mod render;

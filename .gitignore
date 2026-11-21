@@ -12,3 +12,7 @@
 *.swp
 .idea/
 .vscode/
+
+# Reference photos and presets for the Lightroom comparison test, and task notes
+/references/
+/instructions.txt

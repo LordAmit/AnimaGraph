@@ -181,24 +181,51 @@ pub fn hsl_to_rgb(hsl: [f32; 3]) -> [f32; 3] {
     [r + m, g + m, b + m]
 }
 
-/// Per-color hue (±30° at ±1), saturation and luminance changes.
+/// Per-color hue, saturation and luminance changes. A full hue change
+/// (±1) turns a color into its neighbor on the color wheel: red to orange
+/// is 30°, green to aqua 60°. Hue and saturation changes keep the
+/// brightness of the color, as Lightroom's do (measured against photos
+/// exported from it, see lr_match.rs).
 pub fn apply_hsl(c: [f32; 3], hsl: &[[f32; 3]; 8]) -> [f32; 3] {
-    let [h, s, l] = rgb_to_hsl([c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)]);
+    let c = [c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)];
+    let [h, s, l] = rgb_to_hsl(c);
     if s < 1e-3 {
         return c;
     }
     let w = band_weights(h);
     let (mut dh, mut ds, mut dl) = (0.0, 0.0, 0.0);
     for i in 0..8 {
-        dh += w[i] * hsl[i][0];
+        let center = HSL_CENTERS[i];
+        let reach = if hsl[i][0] < 0.0 {
+            (center - HSL_CENTERS[(i + 7) % 8]).rem_euclid(360.0)
+        } else {
+            (HSL_CENTERS[(i + 1) % 8] - center).rem_euclid(360.0)
+        };
+        dh += w[i] * hsl[i][0] * reach;
         ds += w[i] * hsl[i][1];
         dl += w[i] * hsl[i][2];
     }
-    let h2 = h + dh * 30.0;
-    let s2 = (s * (1.0 + ds)).clamp(0.0, 1.0);
-    // Luminance change fades out for grayish colors.
-    let l2 = (l + dl * 0.3 * s.min(1.0)).clamp(0.0, 1.0);
-    hsl_to_rgb([h2, s2, l2])
+    let luma = |c: &[f32; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    let before = luma(&c);
+    let mut out = if dh != 0.0 { hsl_to_rgb([h + dh, s, l]) } else { c };
+    // The turned color at the brightness it had.
+    let turned = luma(&out);
+    if turned > 1e-4 {
+        let k = (before / turned).min(4.0);
+        for v in out.iter_mut() {
+            *v *= k;
+        }
+    }
+    // Luminance change fades out for grayish colors. Its strength was
+    // measured against Lightroom (see lr_match.rs).
+    let lift = dl * 0.06 * s.min(1.0);
+    // Lowering a band's saturation acts more strongly than raising it:
+    // -30 leaves about half of the color.
+    let f = if ds < 0.0 { (1.0 + ds).max(0.0).powf(1.8) } else { 1.0 + ds };
+    for v in out.iter_mut() {
+        *v = (before + (*v - before) * f + lift).clamp(0.0, 1.0);
+    }
+    out
 }
 
 /// A tint for color grading: a hue (degrees) at a saturation (0..1),
@@ -228,7 +255,9 @@ pub fn grade_offset(l: f32, grade: &[[f32; 3]; 4], balance: f32, blend: f32) -> 
     for (i, (g, w)) in grade.iter().zip([ws, wm, wh, 1.0]).enumerate() {
         let mut t = [0.0f32; 3];
         if g[1] > 0.0 {
-            t = tone_color(g[0], g[1], if i == 3 { 0.15 } else { 0.2 });
+            // Strength of the three ranges measured against Lightroom
+            // (see lr_match.rs).
+            t = tone_color(g[0], g[1], if i == 3 { 0.15 } else { 0.33 });
         }
         let lift = g[2] * 0.2;
         for c in 0..3 {
@@ -286,6 +315,26 @@ mod tests {
         // Blue is untouched by a red change.
         let blue = apply_hsl([0.1, 0.2, 0.9], &hsl);
         assert!((blue[2] - 0.9).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hue_and_saturation_changes_keep_the_brightness() {
+        let luma = |c: [f32; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+        let green = [0.39, 0.45, 0.15];
+        let mut hsl = [[0.0f32; 3]; 8];
+        hsl[2] = [-0.3, -0.4, 0.0]; // yellow
+        hsl[3] = [-0.4, -0.6, 0.0]; // green
+        let out = apply_hsl(green, &hsl);
+        assert!((luma(out) - luma(green)).abs() < 0.01, "{out:?}");
+        assert!(out[1] - out[2] < (green[1] - green[2]) * 0.7, "less color: {out:?}");
+        // A full change turns a color into its neighbor: blue to aqua is 60°.
+        let mut hsl = [[0.0f32; 3]; 8];
+        hsl[5][0] = -1.0;
+        let hue = rgb_to_hsl(apply_hsl([0.1, 0.1, 0.9], &hsl))[0];
+        assert!((hue - 180.0).abs() < 2.0, "{hue}");
+        hsl[5][0] = 1.0; // blue to purple is 30°
+        let hue = rgb_to_hsl(apply_hsl([0.1, 0.1, 0.9], &hsl))[0];
+        assert!((hue - 270.0).abs() < 2.0, "{hue}");
     }
 
     #[test]

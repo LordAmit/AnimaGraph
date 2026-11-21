@@ -224,22 +224,27 @@ fn exposure_gain(stops: f32) -> f32 {
 /// rather than the pixel itself, so fine detail keeps its contrast.
 fn shadow_highlight_gain(look: &Look, base: f32) -> f32 {
     let b = base.clamp(0.0, 1.0);
-    let ws = (1.0 - b).powi(3);
-    let s = if look.shadows >= 0.0 { look.shadows } else { look.shadows * 0.5 };
+    // Measured against three photos exported from Lightroom with presets
+    // (see lr_match.rs). Lifting shadows reaches into the middle tones;
+    // deepening them stays in the dark tones.
+    let s = if look.shadows >= 0.0 {
+        look.shadows * (1.0 - b).powf(1.4)
+    } else {
+        look.shadows * 0.5 * (1.0 - b).powi(3)
+    };
     let h = if look.highlights >= 0.0 {
         look.highlights * 0.25 * b.powi(3)
     } else {
-        // Recovering highlights reaches well into the upper middle tones,
-        // as in Lightroom: measured against two photos edited there, -30
-        // darkens tones from about a third of full brightness upward by
-        // about an eighth. Stronger settings add less and less.
+        // Recovering highlights darkens tones from about a third of full
+        // brightness upward, in proportion to the setting (-30 by about a
+        // sixteenth), and near-white a little less.
         let smooth = |a: f32, z: f32| {
             let t = ((b - a) / (z - a)).clamp(0.0, 1.0);
             t * t * (3.0 - 2.0 * t)
         };
-        -0.22 * (-look.highlights).sqrt() * smooth(0.12, 0.4) * (1.0 - 0.45 * smooth(0.55, 0.95))
+        0.21 * look.highlights * smooth(0.27, 0.48) * (1.0 - 0.45 * smooth(0.55, 0.95))
     };
-    (1.0 + s * ws) * (1.0 + h)
+    (1.0 + s) * (1.0 + h)
 }
 
 /// One channel value (0..1) through contrast, the black and white points,
@@ -253,12 +258,16 @@ fn tone(v: f32, look: &Look) -> f32 {
         v -= c * (std::f32::consts::TAU * v).sin() / std::f32::consts::TAU;
     }
     // Black and white points.
-    v += look.blacks * 0.15 * (1.0 - v).powi(3);
+    v += look.blacks * 0.1 * (1.0 - v).powi(3);
     v += look.whites * 0.15 * v.powi(3);
-    // Dehaze: pull the black point down (or lift it for negative values).
-    if look.dehaze != 0.0 {
+    // Dehaze darkens the middle tones and keeps black and white in place,
+    // as measured against Lightroom (+10 takes middle gray down by about a
+    // tenth). Negative values lift the black point.
+    if look.dehaze > 0.0 {
+        v = v.clamp(0.0, 1.0).powf(1.0 + 2.0 * look.dehaze);
+    } else if look.dehaze < 0.0 {
         let d = look.dehaze * 0.12;
-        v = if d > 0.0 { (v - d) / (1.0 - d) } else { v * (1.0 + d) - d };
+        v = v * (1.0 + d) - d;
     }
     v = v.clamp(0.0, 1.0);
     if look.s_curve != 0.0 {
@@ -269,11 +278,59 @@ fn tone(v: f32, look: &Look) -> f32 {
     v
 }
 
+/// How much of a tone change's effect on color strength follows the
+/// brightness change only (the rest follows each channel's own change).
+const TONE_COLOR_BY_BRIGHTNESS: f32 = 0.5;
+
+/// A color through the tone controls and the all-channel curve (`curve`,
+/// one channel value to its new value), the way Lightroom does it, measured
+/// against three photos exported from it (see lr_match.rs). The hue stays:
+/// the largest and smallest channel go through the curve and the middle one
+/// keeps its place between them. The color strength changes less than it
+/// would with each channel on its own: part of it only follows the change
+/// in brightness. Gray values get exactly the curve.
+fn toned(c: [f32; 3], curve: &impl Fn(f32) -> f32) -> [f32; 3] {
+    let c = [c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)];
+    let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    if max - min < 1e-5 {
+        let v = curve(max);
+        return [v, v, v];
+    }
+    let (new_max, new_min) = (curve(max), curve(min));
+    let lum = |c: &[f32; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    let mut out = [0.0f32; 3];
+    for k in 0..3 {
+        out[k] = new_min + (c[k] - min) / (max - min) * (new_max - new_min);
+    }
+    let (before, after) = (lum(&c), lum(&out));
+    // Color strength if only the brightness had changed.
+    let ratio = (after / before.max(0.02)).min(4.0);
+    let t = TONE_COLOR_BY_BRIGHTNESS;
+    for k in 0..3 {
+        out[k] = after + (out[k] - after) * (1.0 - t) + (c[k] - before) * ratio * t;
+    }
+    out
+}
+
 /// S-curve of strength `s` (-1..1) around `pivot`.
 fn s_curve(v: f32, s: f32, pivot: f32) -> f32 {
     let p = pivot.clamp(0.05, 0.95);
     let e = if s >= 0.0 { 1.0 + 2.0 * s } else { 1.0 / (1.0 - 2.0 * s) };
     if v < p { p * (v / p).powf(e) } else { 1.0 - (1.0 - p) * ((1.0 - v) / (1.0 - p)).powf(e) }
+}
+
+/// How far toward Lightroom's wide working space (ProPhoto RGB) the tone
+/// controls work: 0 is sRGB, 1 is ProPhoto RGB. Measured against photos
+/// exported from Lightroom (see lr_match.rs).
+const TONE_SPACE: f32 = 0.5;
+
+/// An encoded sRGB color changed by `f` in the wide space `space`, where
+/// `f` gets and returns encoded values (0..1).
+fn in_space(space: &crate::colour::Wide, c: [f32; 3], f: impl Fn([f32; 3]) -> [f32; 3]) -> [f32; 3] {
+    use crate::colour::{encoded, light};
+    let wide = space.to_wide(c.map(|v| light(v.clamp(0.0, 1.0))));
+    let out = space.to_srgb(f(wide.map(|v| encoded(v.max(0.0)))).map(light));
+    out.map(|v| encoded(v.max(0.0)))
 }
 
 /// Color and tone, without grain.
@@ -285,9 +342,9 @@ pub fn apply_tone(img: &mut RgbaImage, look: &Look) {
     let gain = exposure_gain(look.exposure);
     // White balance: warmth (blue-yellow) and tint (green-magenta).
     let warm = [
-        (1.0 + 0.12 * look.warmth) * (1.0 + 0.04 * look.tint),
+        (1.0 + WARMTH * look.warmth) * (1.0 + 0.04 * look.tint),
         1.0 - 0.1 * look.tint,
-        (1.0 - 0.12 * look.warmth) * (1.0 + 0.04 * look.tint),
+        (1.0 - WARMTH * look.warmth) * (1.0 + 0.04 * look.tint),
     ];
     // First stage, per channel: white balance and exposure (not clipped
     // yet, so Highlights can bring back brightened tones).
@@ -297,29 +354,34 @@ pub fn apply_tone(img: &mut RgbaImage, look: &Look) {
             *t = i as f32 / 255.0 * warm[k] * gain;
         }
     }
-    // Second stage, per channel: the tone controls, the all-channel curve
-    // and that channel's own curve, sampled finely and interpolated.
+    // Second stage: the tone controls and the all-channel curve in one
+    // table, and each channel's own curve in another, sampled finely and
+    // interpolated.
     const STEPS: usize = 1024;
     let master = &look.curves[0];
-    let mut post = vec![[0.0f32; 3]; STEPS + 1];
-    for (i, row) in post.iter_mut().enumerate() {
-        for (k, t) in row.iter_mut().enumerate() {
-            let own = &look.curves[k + 1];
-            let mut v = tone(i as f32 / STEPS as f32, look);
-            if !master.is_identity() {
-                v = master.eval(v);
-            }
-            if !own.is_identity() {
-                v = own.eval(v);
-            }
-            *t = v;
+    let mut shared = vec![0.0f32; STEPS + 1];
+    let mut own = vec![[0.0f32; 3]; STEPS + 1];
+    for i in 0..=STEPS {
+        let x = i as f32 / STEPS as f32;
+        let v = tone(x, look);
+        shared[i] = if master.is_identity() { v } else { master.eval(v) };
+        for (k, t) in own[i].iter_mut().enumerate() {
+            *t = look.curves[k + 1].eval(x);
         }
     }
-    let lut = |k: usize, v: f32| {
+    let own_curves = look.curves[1..].iter().any(|c| !c.is_identity());
+    let at = |v: f32| {
         let x = v.clamp(0.0, 1.0) * STEPS as f32;
         let i = (x as usize).min(STEPS - 1);
-        let f = x - i as f32;
-        post[i][k] * (1.0 - f) + post[i + 1][k] * f
+        (i, x - i as f32)
+    };
+    let shared_tone = |v: f32| {
+        let (i, f) = at(v);
+        shared[i] * (1.0 - f) + shared[i + 1] * f
+    };
+    let own_tone = |k: usize, v: f32| {
+        let (i, f) = at(v);
+        own[i][k] * (1.0 - f) + own[i + 1][k] * f
     };
     // Shadows and Highlights work on each pixel's neighborhood brightness.
     let base: Option<Vec<f32>> = (look.shadows != 0.0 || look.highlights != 0.0).then(|| {
@@ -330,7 +392,9 @@ pub fn apply_tone(img: &mut RgbaImage, look: &Look) {
         let r = ((w.min(h) / 30).max(2)) as u32;
         crate::scene::blur_mask(&crate::scene::blur_mask(&lum, w as u32, h as u32, r), w as u32, h as u32, r)
     });
-    let sat = 1.0 + look.saturation + 0.25 * look.dehaze;
+    // Removing haze strengthens colors (+10 by about a tenth, measured
+    // against Lightroom); adding haze softens them less.
+    let sat = 1.0 + look.saturation + if look.dehaze > 0.0 { look.dehaze } else { 0.25 * look.dehaze };
     let use_hsl = look.hsl.iter().any(|b| b.iter().any(|v| *v != 0.0));
     let use_grade = look.grade.iter().any(|g| g[1] > 0.0 || g[2] != 0.0);
     // Detail: the difference between each pixel's brightness and its
@@ -339,94 +403,113 @@ pub fn apply_tone(img: &mut RgbaImage, look: &Look) {
     let local = detail(img, look);
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     let rmax2 = cx * cx + cy * cy;
+    // Lightroom works in a wide color space: the tone controls partly, each
+    // channel's own curve fully.
+    let tone_space = crate::colour::Wide::new(TONE_SPACE);
+    let curve_space = crate::colour::Wide::new(1.0);
     par_chunks(img.as_mut(), w * 4, |y, row| {
         let dy = y as f32 - cy;
         for x in 0..w {
             let px = &mut row[x * 4..x * 4 + 3];
             let mut c = [pre[0][px[0] as usize], pre[1][px[1] as usize], pre[2][px[2] as usize]];
-            if let Some(base) = &base {
-                // Mostly the pixel itself, partly its neighborhood: dark detail
-                // beside a bright area is not pulled down with it.
-                let own = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
-                let g = shadow_highlight_gain(look, 0.25 * base[y * w + x] + 0.75 * own);
-                // Recovering highlights also brings near-white down a little,
-                // as Lightroom does (about 250 to 233 at -30).
+            // The vignette changes the light before the tone controls, as
+            // Lightroom's does: contrast and curves then act on the darkened
+            // (or lightened) edges, and black stays black.
+            let mut vig = 1.0;
+            if look.vignette != 0.0 {
+                let t = vignette_weight(look, x as f32 - cx, dy, cx, cy, rmax2);
+                vig = (-VIGNETTE_STRENGTH * look.vignette * t).exp();
                 for v in c.iter_mut() {
-                    *v *= g;
+                    *v *= vig;
                 }
-                if g < 1.0 {
-                    // Lightroom darkens each color channel on its own, so
-                    // colors deepen as they darken.
+                if vig < 1.0 {
+                    // Colors get stronger where the edges darken, as with
+                    // Lightroom's vignette.
                     let l = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
-                    let k = 1.0 + 2.0 * (1.0 - g);
+                    let k = (1.0 + VIGNETTE_COLOR * (1.0 / vig - 1.0)).min(2.0);
                     for v in c.iter_mut() {
                         *v = l + (*v - l) * k;
                     }
                 }
             }
-            let mut c = [lut(0, c[0]), lut(1, c[1]), lut(2, c[2])];
+            if let Some(base) = &base {
+                // Mostly the pixel itself, partly its neighborhood: dark detail
+                // beside a bright area is not pulled down with it.
+                let own = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+                let g = shadow_highlight_gain(look, 0.25 * base[y * w + x] * vig + 0.75 * own);
+                for v in c.iter_mut() {
+                    *v *= g;
+                }
+            }
+            // Color changes come before contrast and the curves, as in
+            // Lightroom: a sky made stronger here gets deeper with contrast,
+            // and the color cast of the curves stays on colors made weaker.
+            {
+                if look.green_shift > 0.0 || look.green_curve != 0.0 {
+                    // How green the pixel is: green above both red and blue.
+                    // Only green areas are changed; other colors stay as they are.
+                    let greenness = ((c[1] - c[0].max(c[2])) / 0.12).clamp(0.0, 1.0);
+                    if greenness > 0.0 {
+                        if look.green_curve != 0.0 {
+                            let curved = s_curve(c[1].clamp(0.0, 1.0), look.green_curve, 0.5);
+                            c[1] += (curved - c[1]) * greenness;
+                        }
+                        let w = greenness * look.green_shift;
+                        c[2] += (c[1] - c[2]) * 0.9 * w;
+                        c[0] *= 1.0 - 0.3 * w;
+                        c[1] *= 1.0 - 0.12 * w;
+                    }
+                }
+                if use_hsl {
+                    c = crate::develop::apply_hsl(c, &look.hsl);
+                }
+                // Vibrance: changes muted colors more than strong ones.
+                let mut px_sat = sat;
+                if look.vibrance != 0.0 {
+                    let max = c[0].max(c[1]).max(c[2]);
+                    let min = c[0].min(c[1]).min(c[2]);
+                    let s_now = if max > 0.0 { (max - min) / max } else { 0.0 };
+                    if look.vibrance < 0.0 {
+                        px_sat += look.vibrance * 2.0 * (1.0 - s_now);
+                    } else if s_now > 0.0 {
+                        // Raising vibrance holds back on skin tones (orange
+                        // hues). The brightest channel stays and the others
+                        // drop.
+                        let hue = crate::develop::rgb_to_hsl([c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)])[0];
+                        let near = |center: f32, width: f32| {
+                            (1.0 - ((hue - center + 180.0).rem_euclid(360.0) - 180.0).abs() / width).max(0.0)
+                        };
+                        let k = 1.0 + look.vibrance * VIBRANCE * (1.0 - s_now) * (1.0 - 0.8 * near(25.0, 40.0));
+                        for v in c.iter_mut() {
+                            *v = max - (max - *v) * k;
+                        }
+                    }
+                }
+                let l = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+                c = c.map(|v| l + (v - l) * px_sat.max(0.0));
+            }
+            let mut c = in_space(&tone_space, c, |c| toned(c, &shared_tone));
+            if own_curves {
+                c = in_space(&curve_space, c, |c| [own_tone(0, c[0]), own_tone(1, c[1]), own_tone(2, c[2])]);
+            }
             if let Some(local) = &local {
                 let d = local[y * w + x];
                 for v in c.iter_mut() {
                     *v += d;
                 }
             }
-            if look.green_shift > 0.0 || look.green_curve != 0.0 {
-                // How green the pixel is: green above both red and blue.
-                // Only green areas are changed; other colors stay as they are.
-                let greenness = ((c[1] - c[0].max(c[2])) / 0.12).clamp(0.0, 1.0);
-                if greenness > 0.0 {
-                    if look.green_curve != 0.0 {
-                        let curved = s_curve(c[1].clamp(0.0, 1.0), look.green_curve, 0.5);
-                        c[1] += (curved - c[1]) * greenness;
-                    }
-                    let w = greenness * look.green_shift;
-                    c[2] += (c[1] - c[2]) * 0.9 * w;
-                    c[0] *= 1.0 - 0.3 * w;
-                    c[1] *= 1.0 - 0.12 * w;
-                }
-            }
-            if use_hsl {
-                c = crate::develop::apply_hsl(c, &look.hsl);
-            }
             let l = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
-            // Vibrance: boosts muted colors more than strong ones.
-            let mut px_sat = sat;
-            if look.vibrance != 0.0 {
-                let max = c[0].max(c[1]).max(c[2]);
-                let min = c[0].min(c[1]).min(c[2]);
-                let s_now = if max > 0.0 { (max - min) / max } else { 0.0 };
-                // Raising vibrance holds back on skin tones (orange hues).
-                let skin = if look.vibrance > 0.0 && s_now > 0.0 {
-                    let hue = crate::develop::rgb_to_hsl([c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)])[0];
-                    (1.0 - ((hue - 25.0 + 180.0).rem_euclid(360.0) - 180.0).abs() / 25.0).max(0.0)
-                } else {
-                    0.0
-                };
-                px_sat += look.vibrance * (1.0 - s_now) * (1.0 - 0.5 * skin);
-            }
             let grade = if use_grade {
                 crate::develop::grade_offset(l, &look.grade, look.grade_balance, look.grade_blend)
             } else {
                 [0.0; 3]
             };
-            let (mut vig, mut lift) = (1.0, 0.0);
-            if look.vignette != 0.0 {
-                let t = vignette_weight(look, x as f32 - cx, dy, cx, cy, rmax2);
-                if look.vignette > 0.0 {
-                    vig = 1.0 - look.vignette * 0.65 * t;
-                } else {
-                    lift = -look.vignette * 0.65 * t;
-                }
-            }
             for k in 0..3 {
-                let mut v = l + (c[k] - l) * px_sat.max(0.0);
+                let mut v = c[k];
                 v += grade[k];
                 v = v * (1.0 - 0.22 * look.fade) + 0.1 * look.fade;
                 // Split toning, strongest in the deep shadows / bright highlights.
                 v += look.tint_shadows[k] * (1.0 - l).powi(2) + look.tint_highlights[k] * l * l;
-                v = v * vig;
-                v += (1.0 - v) * lift;
                 px[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         }
@@ -471,6 +554,21 @@ fn detail(img: &RgbaImage, look: &Look) -> Option<Vec<f32>> {
     }
     Some(out)
 }
+
+/// Strength of raising vibrance. Measured against photos exported from
+/// Lightroom (see lr_match.rs).
+const VIBRANCE: f32 = 0.3;
+
+/// Share of red added and blue removed at full warmth. Measured against
+/// photos exported from Lightroom (see lr_match.rs).
+const WARMTH: f32 = 0.5;
+
+/// How strongly the vignette changes the light at its edge: at full strength
+/// the corners keep exp(-0.85), a little under half, of their value.
+const VIGNETTE_STRENGTH: f32 = 0.85;
+/// How much stronger colors get where the vignette darkens: this many
+/// times the share of light removed.
+const VIGNETTE_COLOR: f32 = 2.0;
 
 /// Short side of the photo that grain size and sharpening are measured
 /// against (a typical phone or camera photo).
@@ -642,7 +740,8 @@ mod tests {
         let sh = Look { shadows: 1.0, ..Look::default() };
         assert!(gray_after(50, &sh) > 70, "shadows lift dark areas");
         assert_eq!(gray_after(0, &sh), 0, "black stays black");
-        assert!(gray_after(220, &sh) < 225, "bright areas barely move");
+        assert!(gray_after(220, &sh) < 236, "bright areas move much less");
+        assert!(gray_after(128, &sh) > 160, "lifting shadows reaches the middle tones");
         let hi = Look { highlights: -1.0, ..Look::default() };
         assert!(gray_after(210, &hi) < 185, "highlights pull bright areas down");
         let white = gray_after(255, &hi);
@@ -656,6 +755,50 @@ mod tests {
         apply_tone(&mut img, &sh);
         let (a, b) = (img.get_pixel(32, 32)[0] as i32, img.get_pixel(33, 32)[0] as i32);
         assert!((a - b).abs() > 20, "{a} {b}");
+    }
+
+    #[test]
+    fn tone_changes_keep_the_hue_and_gray_values() {
+        let curve = |v: f32| v * v; // darkens, steeper toward white
+        let gray = toned([0.5, 0.5, 0.5], &curve);
+        assert!(gray.iter().all(|v| (v - 0.25).abs() < 1e-6), "{gray:?}");
+        let before = [0.7, 0.5, 0.3];
+        let after = toned(before, &curve);
+        let hue = |c: [f32; 3]| crate::develop::rgb_to_hsl(c)[0];
+        assert!((hue(after) - hue(before)).abs() < 0.5, "{} {}", hue(before), hue(after));
+        // The color is weaker than with each channel through the curve on
+        // its own (0.49 - 0.09), and stronger than none at all.
+        let spread = after[0] - after[2];
+        assert!(spread > 0.2 && spread < 0.4 - 0.02, "{spread}");
+    }
+
+    #[test]
+    fn dehaze_darkens_middle_tones_and_keeps_black_and_white() {
+        let look = Look { dehaze: 0.1, ..Look::default() };
+        assert_eq!(gray_after(0, &look), 0);
+        assert_eq!(gray_after(255, &look), 255);
+        let mid = gray_after(128, &look);
+        assert!((108..=116).contains(&mid), "{mid}");
+    }
+
+    #[test]
+    fn vignette_comes_before_the_tone_controls() {
+        // With more contrast the darkened corner loses more than the
+        // vignette alone takes: the contrast acts on the darkened value.
+        let corner = |look: &Look| {
+            let mut img = RgbaImage::from_pixel(200, 100, image::Rgba([100, 100, 100, 255]));
+            apply_tone(&mut img, look);
+            (img.get_pixel(0, 0)[0] as f32, img.get_pixel(100, 50)[0] as f32)
+        };
+        let (plain_corner, plain_mid) = corner(&Look { vignette: 0.5, ..Look::default() });
+        let (hard_corner, hard_mid) = corner(&Look { vignette: 0.5, contrast: 0.5, ..Look::default() });
+        assert!(hard_corner / hard_mid < plain_corner / plain_mid - 0.03);
+        // Colors get stronger where the corners darken.
+        let mut img = RgbaImage::from_pixel(200, 100, image::Rgba([200, 180, 160, 255]));
+        apply_tone(&mut img, &Look { vignette: 0.5, ..Look::default() });
+        let (c, m) = (img.get_pixel(0, 0), img.get_pixel(100, 50));
+        let strength = |p: &image::Rgba<u8>| (p[0] as f32 - p[2] as f32) / p[0] as f32;
+        assert!(strength(c) > strength(m) + 0.05, "{c:?} {m:?}");
     }
 
     #[test]
@@ -674,6 +817,38 @@ mod tests {
         let p = img.get_pixel(1, 1);
         let cool = (p[2] as i32 - p[0] as i32) - (other[2] as i32 - other[0] as i32);
         assert!(skin > 0 && skin < cool, "{skin} {cool}");
+    }
+
+    #[test]
+    fn raising_vibrance_keeps_the_brightest_channel() {
+        let mut img = RgbaImage::from_pixel(4, 4, image::Rgba([73, 143, 197, 255]));
+        apply_tone(&mut img, &Look { vibrance: 0.5, ..Look::default() });
+        let sky = img.get_pixel(1, 1).0;
+        assert_eq!(sky[2], 197);
+        assert!(sky[0] < 73 && sky[1] < 143, "{sky:?}");
+    }
+
+    #[test]
+    fn a_channel_curve_tints_weakened_colors_as_much_as_gray() {
+        // Color changes come before the curves, so the red cast of a raised
+        // red curve stays in full on a sky whose blue was taken away.
+        let mut look = Look::default();
+        look.curves[1] = crate::develop::Curve::from_points(&[[0.0, 0.0], [0.5, 0.56], [1.0, 1.0]]);
+        look.hsl[4][1] = -1.0;
+        look.hsl[5][1] = -1.0;
+        look.hsl[6][1] = -1.0;
+        let after = |c: [u8; 3]| {
+            let mut img = RgbaImage::from_pixel(4, 4, image::Rgba([c[0], c[1], c[2], 255]));
+            apply_tone(&mut img, &look);
+            img.get_pixel(1, 1).0
+        };
+        let (sky, gray) = (after([60, 110, 220]), after([108, 108, 108]));
+        let cast = |c: [u8; 4]| c[0] as i32 - c[1] as i32;
+        assert!(cast(gray) > 10, "{gray:?}");
+        assert!((cast(sky) - cast(gray)).abs() <= 4, "{sky:?} {gray:?}");
+        // The curve works in the wide space: raising red there also takes a
+        // little green away, so the cast is larger than the curve's own step.
+        assert!(gray[0] > 108 + 15 && gray[1] < 108, "{gray:?}");
     }
 
     #[test]

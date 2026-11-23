@@ -48,7 +48,7 @@ fn turn_video(v: &crate::video::VideoSource, turn: &dyn Fn(&RgbaImage) -> RgbaIm
 
 /// The picture before straightening, kept so the angle can change freely.
 struct StraightBase {
-    full: RgbaImage,
+    full: std::sync::Arc<RgbaImage>,
     work: RgbaImage,
     video: Option<std::sync::Arc<crate::video::VideoSource>>,
 }
@@ -90,8 +90,9 @@ pub struct Scene {
     pub crop_applied: bool,
     /// This file's look, border and caption.
     pub edits: Edits,
-    /// The photo at its original resolution.
-    pub full: RgbaImage,
+    /// The photo at its original resolution. Shared, so saving in the
+    /// background needs no copy.
+    pub full: std::sync::Arc<RgbaImage>,
     /// A smaller copy used for editing and previews.
     pub work: RgbaImage,
     /// Motion region at work resolution, 0 = still, 1 = moving.
@@ -125,7 +126,7 @@ impl Scene {
             aspect: crate::crop::Aspect::Free,
             crop_applied: false,
             edits: Edits::default(),
-            full,
+            full: std::sync::Arc::new(full),
             work,
             mask: vec![0.0; n],
             arrows: Vec::new(),
@@ -157,7 +158,7 @@ impl Scene {
         if let Some(v) = &self.video {
             let i = index.min(v.frames.len() - 1);
             self.still_index = i;
-            self.full = v.frames[i].clone();
+            self.full = std::sync::Arc::new(v.frames[i].clone());
             self.work = v.work[i].clone();
         }
     }
@@ -237,7 +238,7 @@ impl Scene {
             self.video = Some(std::sync::Arc::new(straighten_video(v, degrees)));
         }
         let base_full = b.video.as_ref().and_then(|v| v.frames.get(i)).unwrap_or(&b.full);
-        self.full = crate::straighten::rotate_fill(base_full, degrees);
+        self.full = std::sync::Arc::new(crate::straighten::rotate_fill(base_full, degrees));
         self.full_outdated = false;
     }
 
@@ -260,7 +261,7 @@ impl Scene {
     fn reload_still(&mut self) {
         if let Some(v) = &self.video {
             let i = self.still_index.min(v.frames.len() - 1);
-            self.full = v.frames[i].clone();
+            self.full = std::sync::Arc::new(v.frames[i].clone());
             self.work = v.work[i].clone();
         }
     }
@@ -305,13 +306,13 @@ impl Scene {
             }
         }
         self.mask = mask;
-        self.full = turn(&self.full);
+        self.full = std::sync::Arc::new(turn(&self.full));
         self.edits.masks = self.edits.masks.iter().map(|m| m.turned(clockwise)).collect();
         self.work = turn(&self.work);
         // The picture before straightening turns too (turns and the angle
         // can be applied in any order).
         if let Some(b) = &mut self.straight_base {
-            b.full = turn(&b.full);
+            b.full = std::sync::Arc::new(turn(&b.full));
             b.work = turn(&b.work);
             if let Some(v) = &b.video {
                 b.video = Some(std::sync::Arc::new(turn_video(v, &turn)));
@@ -635,23 +636,23 @@ mod tests {
         let mut s = Scene::new("t".into(), img.clone());
         s.set_angle(5.0, true);
         assert!(s.full_outdated);
-        assert_eq!(s.full, img);
+        assert_eq!(*s.full, img);
         s.finish_angle();
         assert!(!s.full_outdated);
         assert_eq!(s.full.dimensions(), (40, 20));
-        assert_ne!(s.full, img);
+        assert_ne!(*s.full, img);
         s.push_angle_step(0.0);
         // A quarter turn keeps the angle; going back to 0 shows the turned original.
         s.rotate(true);
         assert_eq!(s.full.dimensions(), (20, 40));
         s.set_angle(0.0, false);
-        assert_eq!(s.full, image::imageops::rotate90(&img));
+        assert_eq!(*s.full, image::imageops::rotate90(&img));
         s.set_angle(5.0, false);
         // Undo the quarter turn, then the angle.
         s.undo();
         assert_eq!(s.full.dimensions(), (40, 20));
         s.undo();
-        assert_eq!(s.full, img);
+        assert_eq!(*s.full, img);
         assert_eq!(s.angle, 0.0);
     }
 

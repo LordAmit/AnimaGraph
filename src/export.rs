@@ -124,7 +124,11 @@ fn save_jpeg_srgb(img: &RgbaImage, target: &Path) -> Result<(), String> {
 fn save_heif(img: &RgbaImage, target: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let tmp = std::env::temp_dir().join(format!("animagraph_heif_{}.png", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "animagraph_heif_{}_{:?}.png",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         // The sRGB profile in this PNG goes into the HEIC file.
         save_png_srgb(img, &tmp)?;
         let out = Command::new("/usr/bin/sips")

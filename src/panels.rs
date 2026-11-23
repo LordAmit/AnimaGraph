@@ -135,11 +135,15 @@ pub fn top_bar(app: &mut StudioApp, ui: &mut egui::Ui) {
                 app.set_panel_visible("controls", !controls_on);
             }
             let can_export = if app.layout_open { app.layout.is_some() && !app.busy() } else { app.can_export() };
-            let export = icons::button(Icon::Download, egui::RichText::new("Export").color(Color32::WHITE).strong(), Color32::WHITE)
+            let several = if app.layout_open { None } else { crate::export_panel::selected_to_save(app) };
+            let words = several.map_or("Export".to_string(), |n| format!("Export {}", crate::batch_export::photos(n)));
+            let hint = crate::export_panel::export_hint(app, several);
+            let export = icons::button(Icon::Download, egui::RichText::new(words).color(Color32::WHITE).strong(), Color32::WHITE)
                 .fill(if can_export { theme::ACCENT } else { theme::ACCENT_SOFT })
                 .min_size(Vec2::new(96.0, 32.0));
             if ui
                 .add_enabled(can_export, export)
+                .on_hover_text(hint)
                 .on_disabled_hover_text("Animate a loop first, or choose a still image format in Export")
                 .clicked()
             {
@@ -858,45 +862,19 @@ fn export_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             };
             ui.label(egui::RichText::new(text).size(12.0).color(theme::TEXT_DIM));
         }
-        ui.horizontal(|ui| {
-            ui.label("Size");
-            let label = |s: u32| match s {
-                0 => "Original".to_string(),
-                n => format!("{n} px"),
-            };
-            egui::ComboBox::from_id_salt("size")
-                .selected_text(label(app.export_size))
-                .width(150.0)
-                .show_ui(ui, |ui| {
-                    for s in [crate::scene::WORK_SIZE, 1024, 1600, 2048, 0] {
-                        ui.selectable_value(&mut app.export_size, s, label(s));
-                    }
-                });
-        });
-        if app.export_size == 0 || app.export_size > 1600 {
-            ui.label(
-                egui::RichText::new("Large sizes take longer and use more memory.")
-                    .size(12.0)
-                    .color(theme::TEXT_DIM),
-            );
-        }
-        // Pictures are never enlarged: say so when the source is smaller.
-        if let Some(sc) = &app.scene {
-            let longest = sc.full.width().max(sc.full.height());
-            if app.export_size > longest {
-                let what = if sc.is_video() { "This video's frames are" } else { "This picture is" };
-                ui.label(
-                    egui::RichText::new(format!("{what} {longest} px on the long side, so it is saved at {longest} px."))
-                        .size(12.0)
-                        .color(theme::TEXT_DIM),
-                );
-            }
-        }
+        crate::export_panel::size_picker(app, ui);
         let can = app.can_export();
         let still = app.export_format.is_still();
+        let several = crate::export_panel::selected_to_save(app);
+        let words = match several {
+            Some(n) => format!("Save {}…", crate::batch_export::photos(n)),
+            None if still => "Save image…".into(),
+            None => "Save selected loop…".into(),
+        };
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(can, egui::Button::new(if still { "Save image…" } else { "Save selected loop…" }))
+                .add_enabled(can, egui::Button::new(words))
+                .on_hover_text(crate::export_panel::export_hint(app, several))
                 .on_disabled_hover_text(if still { "Open a photo first" } else { "Animate a loop first" })
                 .clicked()
             {
@@ -908,6 +886,9 @@ fn export_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 }
             }
         });
+        if still {
+            crate::export_panel::save_all(app, ui);
+        }
     });
 }
 
@@ -2018,6 +1999,21 @@ pub fn border_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         });
         if app.border.enabled && app.border.fit == crate::border::BorderFit::Polaroid {
             polaroid_controls(app, ui);
+        }
+        // The same border on the other files.
+        let n = app.apply_targets().len();
+        let same = icons::button(Icon::Image, format!("Apply border to {}", app.apply_target_words()), theme::TEXT);
+        if ui
+            .add_enabled(n > 0, same)
+            .on_hover_text(
+                "Gives the other open files this border (thickness, colour, style and photo corners), or only the \
+                 files selected in the Files panel. Crop and caption are not changed. With the border off, it is \
+                 removed from them.",
+            )
+            .on_disabled_hover_text("Open more than one file to use this")
+            .clicked()
+        {
+            app.apply_border_to_targets();
         }
         // Resulting output size.
         if let Some(sc) = &app.scene {

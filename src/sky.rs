@@ -24,7 +24,15 @@ pub fn sky_mask(img: &RgbaImage) -> Vec<f32> {
     }
     let rgb: Vec<[f32; 3]> = img.pixels().map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0]).collect();
     let lum: Vec<f32> = rgb.iter().map(|c| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]).collect();
-    let grad = gradient(&box_blur(&lum, w, h, 1), w, h);
+    // The strongest edge of red, green and blue: a pink roof or a yellow ball
+    // can be exactly as bright as the sky beside it.
+    let mut grad = vec![0.0f32; w * h];
+    for k in 0..3 {
+        let channel: Vec<f32> = rgb.iter().map(|c| c[k]).collect();
+        for (g, v) in grad.iter_mut().zip(gradient(&box_blur(&channel, w, h, 1), w, h)) {
+            *g = g.max(v);
+        }
+    }
 
     // How strong an edge stops the sky: well above the texture of the sky
     // itself (clouds), measured along the top of the picture.
@@ -134,16 +142,18 @@ pub fn sky_mask(img: &RgbaImage) -> Vec<f32> {
             // Smooth and close in colour, or a very close match even next to
             // an edge (sky seen between chains, cables and railings).
             let d = dist(rgb[i], c);
-            if !sky[i] && ((grad[i] < edge && d < 0.09) || d < 0.05) {
+            // Hazier sky is the same colour, only brighter.
+            let hazy = grad[i] < edge && d < 0.16 && colour_dist(rgb[i], c) < 0.04 && strength(rgb[i]) > 0.05 && rgb[i][2] > c[2];
+            if !sky[i] && ((grad[i] < edge && d < 0.09) || d < 0.05 || hazy) {
                 mask[i] = 1.0;
             }
         }
     }
 
     // Thin cracks along sharp cloud edges are sky too.
-    close_cracks(&mut mask, w, h, 2);
-    // Small holes enclosed by sky (bright cloud tops, birds) are sky too.
-    fill_small_holes(&mut mask, w, h, (w * h) / 300);
+    close_cracks(&mut mask, &rgb, w, h, 2);
+    // Small sky-coloured holes enclosed by sky (bright cloud tops) are sky too.
+    fill_small_holes(&mut mask, &rgb, w, h, (w * h) / 300);
 
     // 3. Fit the edge to the picture's edges.
     let r = (w.max(h) / 256).max(2);
@@ -209,39 +219,51 @@ fn behind_thin_things_pass(sky: &[bool], rgb: &[[f32; 3]], lum: &[f32], grad: &[
             continue;
         }
         let mean_lum = 0.2126 * mean[0] + 0.7152 * mean[1] + 0.0722 * mean[2];
-        // The top of the region in each column, and the sky just above it.
+        // The sky just above each column of the region, or just beside each
+        // of its rows (a cloud boxed in by two posts and a sign).
         let mut top = vec![usize::MAX; w];
+        let (mut left, mut right) = (vec![usize::MAX; h], vec![0usize; h]);
         for &i in &members {
             let (x, y) = (i % w, i / w);
             top[x] = top[x].min(y);
+            left[y] = left[y].min(x);
+            right[y] = right[y].max(x);
         }
-        let (mut columns, mut found, mut sky_sum, mut sky_lum) = (0usize, 0usize, [0f32; 3], 0f32);
-        for (x, &t) in top.iter().enumerate() {
-            if t == usize::MAX {
-                continue;
-            }
+        let mut above_hits = Vec::new();
+        let mut columns = 0;
+        for (x, &t) in top.iter().enumerate().filter(|(_, t)| **t != usize::MAX) {
             columns += 1;
-            for d in 1..=thin {
-                if t < d {
-                    break;
-                }
-                let j = (t - d) * w + x;
-                if sky[j] {
-                    found += 1;
-                    for k in 0..3 {
-                        sky_sum[k] += rgb[j][k];
-                    }
-                    sky_lum += lum[j];
-                    break;
-                }
-            }
+            above_hits.extend((1..=thin.min(t)).map(|d| (t - d) * w + x).find(|&j| sky[j]));
         }
-        if found == 0 || found * 10 < columns * 4 {
+        let mut side_hits = Vec::new();
+        let mut sides = 0;
+        for y in (0..h).filter(|&y| left[y] != usize::MAX) {
+            sides += 2;
+            side_hits.extend((1..=thin.min(left[y])).map(|d| y * w + left[y] - d).find(|&j| sky[j]));
+            side_hits.extend((1..=thin.min(w - 1 - right[y])).map(|d| y * w + right[y] + d).find(|&j| sky[j]));
+        }
+        let hits = if above_hits.len() * 10 >= columns * 4 && !above_hits.is_empty() {
+            above_hits
+        } else if side_hits.len() * 10 >= sides * 6 {
+            side_hits
+        } else {
             continue;
+        };
+        let (found, mut sky_sum, mut sky_lum) = (hits.len(), [0f32; 3], 0f32);
+        for j in hits {
+            for k in 0..3 {
+                sky_sum[k] += rgb[j][k];
+            }
+            sky_lum += lum[j];
         }
         let f = found as f32;
         let above = [sky_sum[0] / f, sky_sum[1] / f, sky_sum[2] / f];
-        if dist(mean, above) < 0.25 && mean_lum >= sky_lum / f - 0.03 {
+        // A pale pink roof under pale clouds is as bright as they are, but
+        // not their colour.
+        // Haze is no more strongly coloured than the sky above it; a painted
+        // blue canopy is.
+        let paler = strength(mean) <= strength(above) * 1.1 + 0.01;
+        if paler && dist(mean, above) < 0.25 && colour_dist(mean, above) < 0.14 && mean_lum >= sky_lum / f - 0.03 {
             add.extend(members);
         }
     }
@@ -250,12 +272,15 @@ fn behind_thin_things_pass(sky: &[bool], rgb: &[[f32; 3]], lum: &[f32], grad: &[
 
 /// Fill cracks narrower than about 2r pixels inside the sky (dilate, then
 /// erode, a binary mask).
-fn close_cracks(mask: &mut [f32], w: usize, h: usize, r: usize) {
+fn close_cracks(mask: &mut [f32], rgb: &[[f32; 3]], w: usize, h: usize, r: usize) {
     let bin: Vec<f32> = mask.iter().map(|&v| if v >= 0.5 { 1.0 } else { 0.0 }).collect();
     let grown = extreme(&bin, w, h, r, true);
     let closed = extreme(&grown, w, h, r, false);
-    for (m, c) in mask.iter_mut().zip(closed) {
-        *m = m.max(c);
+    for ((m, c), colour) in mask.iter_mut().zip(closed).zip(rgb) {
+        // Wires, trunks and railings are not sky however thin they are.
+        if fills_in(*colour) {
+            *m = m.max(c);
+        }
     }
 }
 
@@ -281,7 +306,7 @@ fn extreme(v: &[f32], w: usize, h: usize, r: usize, max: bool) -> Vec<f32> {
 
 /// Mark as sky every patch of non-sky smaller than `max_area` pixels that
 /// does not reach the left, right or bottom edge of the picture.
-fn fill_small_holes(mask: &mut [f32], w: usize, h: usize, max_area: usize) {
+fn fill_small_holes(mask: &mut [f32], rgb: &[[f32; 3]], w: usize, h: usize, max_area: usize) {
     let mut seen = vec![false; w * h];
     for start in 0..w * h {
         if seen[start] || mask[start] >= 0.5 {
@@ -310,9 +335,17 @@ fn fill_small_holes(mask: &mut [f32], w: usize, h: usize, max_area: usize) {
                 }
             }
         }
-        if !open_edge && patch.len() <= max_area {
+        let mut mean = [0f32; 3];
+        for &i in &patch {
+            for k in 0..3 {
+                mean[k] += rgb[i][k] / patch.len() as f32;
+            }
+        }
+        if !open_edge && patch.len() <= max_area && fills_in(mean) {
             for i in patch {
-                mask[i] = 1.0;
+                if fills_in(rgb[i]) {
+                    mask[i] = 1.0;
+                }
             }
         }
     }
@@ -324,6 +357,30 @@ fn looks_like_sky(c: [f32; 3]) -> bool {
     let lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     let blue = c[2] > c[0] + 0.05 && c[2] >= c[1] - 0.02;
     (blue && lum > 0.08) || lum > 0.45
+}
+
+/// Colours that small leftovers inside the sky may have: blue like the sky,
+/// or bright and without much colour (cloud).
+fn fills_in(c: [f32; 3]) -> bool {
+    let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    let lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let blue = c[2] > c[0] + 0.05 && c[2] >= c[1] - 0.02;
+    (blue && lum > 0.2) || (lum > 0.55 && max - min < 0.2)
+}
+
+/// How strongly coloured (0 for grey).
+fn strength(c: [f32; 3]) -> f32 {
+    let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    dist(c, [l, l, l])
+}
+
+/// Difference in colour only, whatever the brightness.
+fn colour_dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let only = |c: [f32; 3]| {
+        let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        [c[0] - l, c[1] - l, c[2] - l]
+    };
+    dist(only(a), only(b))
 }
 
 fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {

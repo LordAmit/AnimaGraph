@@ -78,7 +78,13 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
 
     // Fit the output into the canvas, then apply zoom and pan.
     // Keep clear of the tool rail (left), the view switch (top) and the playback bar (bottom).
-    let frame = Rect::from_min_max(area.min + Vec2::new(90.0, 72.0), area.max - Vec2::new(24.0, 84.0));
+    // The crop bar is as high as its rows of guides.
+    let bottom = if crop_tool {
+        ui.ctx().memory(|m| m.area_rect(crop_bar_id())).map_or(160.0, |r| r.height() + 34.0)
+    } else {
+        84.0
+    };
+    let frame = Rect::from_min_max(area.min + Vec2::new(90.0, 72.0), area.max - Vec2::new(24.0, bottom));
     let fit = (frame.width() / out_w).min(frame.height() / out_h).max(0.01);
     let scale = fit * app.zoom;
     let out_rect = Rect::from_center_size(frame.center() + app.pan, Vec2::new(out_w, out_h) * scale);
@@ -239,7 +245,8 @@ pub fn canvas(app: &mut StudioApp, ui: &mut egui::Ui) {
     }
     // Without a confirmed crop, shade what the crop will cut away.
     if view_region.is_full() && compare != Compare::Original {
-        draw_crop_guide(&painter, full_rect, showing_clip_crop.unwrap_or(scene.crop), crop_tool);
+        let guide = (app.crop_guide, app.crop_guide_flip);
+        draw_crop_guide(&painter, full_rect, showing_clip_crop.unwrap_or(scene.crop), crop_tool, guide);
     }
     let painter = painter.with_clip_rect(img_rect.intersect(area));
     // The mask being edited: overlay, guides and handles.
@@ -686,14 +693,23 @@ pub fn sample_color(img: &image::RgbaImage, n: [f32; 2]) -> [u8; 3] {
     [(sum[0] / count) as u8, (sum[1] / count) as u8, (sum[2] / count) as u8]
 }
 
-/// Floating bar shown while cropping: confirm or start over.
+fn crop_bar_id() -> egui::Id {
+    egui::Id::unique("crop_bar")
+}
+
+/// Floating bar shown while cropping: guides, confirm or start over.
 fn crop_bar(app: &mut StudioApp, ui: &mut egui::Ui, area: Rect) {
-    egui::Area::new(egui::Id::unique("crop_bar"))
+    // Beside the tool rail, not over it.
+    let free = Rect::from_min_max(area.min + Vec2::new(74.0, 0.0), area.max - Vec2::new(10.0, 18.0));
+    egui::Area::new(crop_bar_id())
         .pivot(Align2::CENTER_BOTTOM)
-        .fixed_pos(Pos2::new(area.center().x, area.bottom() - 18.0))
+        .fixed_pos(free.center_bottom())
+        // Keeps its place: the rows are already made to fit.
+        .constrain(false)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             floating_frame().show(ui, |ui| {
+                crate::guide_bar::buttons(app, ui, free.width() - 24.0);
                 ui.horizontal(|ui| {
                     let label = app
                         .scene
@@ -748,8 +764,14 @@ fn draw_hints(
 }
 
 /// Darken what the crop will cut away. With `handles`, also draw the
-/// thirds grid and corner grips of the crop tool.
-fn draw_crop_guide(painter: &egui::Painter, img_rect: Rect, crop: CropRect, handles: bool) {
+/// composition guide and corner grips of the crop tool.
+fn draw_crop_guide(
+    painter: &egui::Painter,
+    img_rect: Rect,
+    crop: CropRect,
+    handles: bool,
+    (guide, flip): (crate::composition::Guide, u8),
+) {
     if crop.is_full() && !handles {
         return;
     }
@@ -773,12 +795,12 @@ fn draw_crop_guide(painter: &egui::Painter, img_rect: Rect, crop: CropRect, hand
     if !handles {
         return;
     }
-    let thirds = Stroke::new(1.0, Color32::from_white_alpha(70));
-    for k in 1..3 {
-        let x = keep.min.x + keep.width() * k as f32 / 3.0;
-        let y = keep.min.y + keep.height() * k as f32 / 3.0;
-        painter.line_segment([Pos2::new(x, keep.min.y), Pos2::new(x, keep.max.y)], thirds);
-        painter.line_segment([Pos2::new(keep.min.x, y), Pos2::new(keep.max.x, y)], thirds);
+    for line in guide.lines(keep.width() / keep.height().max(1.0), flip) {
+        let points: Vec<Pos2> =
+            line.iter().map(|p| keep.min + Vec2::new(p[0] * keep.width(), p[1] * keep.height())).collect();
+        // A dark edge keeps the line visible on bright pictures.
+        painter.add(egui::Shape::line(points.clone(), Stroke::new(2.5, Color32::from_black_alpha(70))));
+        painter.add(egui::Shape::line(points, Stroke::new(1.0, Color32::from_white_alpha(170))));
     }
     let grip = Stroke::new(3.5, Color32::WHITE);
     let len = 14.0f32.min(keep.width() / 3.0).min(keep.height() / 3.0);
@@ -901,7 +923,7 @@ fn tool_rail(app: &mut StudioApp, ui: &mut egui::Ui, area: Rect) {
                         (Tool::Eraser, Icon::Eraser, "Erase from the selected area (E)"),
                         (Tool::Arrow, Icon::Arrow, "Draw motion arrow (A)\nRight-click an arrow to remove it"),
                         (Tool::Pin, Icon::Pin, "Pin a point that should stay still (P)"),
-                        (Tool::Crop, Icon::Crop, "Crop (C)\nDrag corners to resize, drag inside to move,\ndouble-click to reset. Pick a shape in the Crop card."),
+                        (Tool::Crop, Icon::Crop, "Crop (C)\nDrag corners to resize, drag inside to move,\ndouble-click to reset, Esc to undo the crop. Pick a shape in the Crop card."),
                         (Tool::Hand, Icon::Hand, "Pan the view (H, or hold Space)"),
                     ];
                     for (tool, icon, tip) in tools {

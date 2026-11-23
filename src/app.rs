@@ -121,12 +121,15 @@ impl Clip {
 pub enum TaskKind {
     Preview(ClipRecipe),
     Export,
+    /// Several photos saved together (see batch_export).
+    Batch,
     Decode,
 }
 
 pub enum TaskResult {
     Frames(Option<Vec<RgbaImage>>),
     Saved(Result<PathBuf, String>),
+    Batch(crate::batch_export::Outcome),
     Video(Result<VideoSource, String>, String),
     /// A developed RAW photo.
     Photo(Result<RgbaImage, String>, String),
@@ -319,7 +322,16 @@ pub struct StudioApp {
     pub last_deleted: Vec<(usize, Clip)>,
 
     pub export_format: Format,
-    pub export_size: u32,
+    /// Size of the saved picture; `export_custom` shows the number to type.
+    pub export_size: crate::export_size::ExportSize,
+    pub export_custom: bool,
+    /// Photos being saved by "Save all photos".
+    pub batch: Option<crate::batch_export::Batch>,
+    /// Composition guide shown while cropping, and how it is flipped.
+    pub crop_guide: crate::composition::Guide,
+    pub crop_guide_flip: u8,
+    /// File, crop and ratio when the crop tool was picked (for Esc).
+    pub crop_entry: Option<(u64, CropRect, crate::crop::Aspect)>,
     pub ffmpeg: bool,
     /// How many times a saved video plays the loop.
     pub video_repeats: u32,
@@ -358,7 +370,7 @@ impl StudioApp {
             photo_tex: None,
             mask_tex: None,
             mask_tex_version: 0,
-            tool: Tool::Brush,
+            tool: Tool::Hand,
             view: View::Edit,
             brush_radius: 28.0,
             brush_hardness: 0.5,
@@ -445,7 +457,12 @@ impl StudioApp {
             task: None,
             last_deleted: Vec::new(),
             export_format: Format::default_export(),
-            export_size: 1024,
+            export_size: crate::export_size::ExportSize::long(1024),
+            export_custom: false,
+            batch: None,
+            crop_guide: crate::composition::Guide::Thirds,
+            crop_guide_flip: 0,
+            crop_entry: None,
             ffmpeg: crate::export::video_available(),
             video_repeats: 3,
             last_export: None,
@@ -650,6 +667,21 @@ impl StudioApp {
         self.status = format!("Applied this file's colour edits to {n} other file{}.", if n == 1 { "" } else { "s" });
     }
 
+    /// Copy only the current file's border (style, colour, corners) to the
+    /// target files.
+    pub fn apply_border_to_targets(&mut self) {
+        let border = self.border;
+        let targets = self.apply_targets();
+        for &i in &targets {
+            if let Some(s) = &mut self.files[i].scene {
+                s.edits.border = border;
+            }
+        }
+        self.save_edits_to_scene();
+        let n = targets.len();
+        self.status = format!("Applied this file's border to {n} other file{}.", if n == 1 { "" } else { "s" });
+    }
+
     /// Copy the current file's framing (crop, straighten, border, caption)
     /// to the target files. Quarter turns are not copied (each file keeps
     /// its own way up). A crop with a fixed shape keeps that shape on
@@ -694,6 +726,10 @@ impl StudioApp {
         self.mask_tex = None;
         self.mask_tex_version = 0;
         self.scene = Some(scene);
+        self.crop_entry = None;
+        if self.tool == Tool::Crop {
+            self.begin_crop();
+        }
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
         self.view = View::Edit;
@@ -869,9 +905,9 @@ impl StudioApp {
             _ => "",
         };
         self.set_scene(ctx, Scene::from_video(name.clone(), video));
-        self.tool = Tool::Rect;
+        self.pick_tool(Tool::Hand);
         self.status = format!(
-            "Loaded {name} ({n} frames, {secs:.1}s).{log} Drag a box or paint the area to freeze, then press Make loop."
+            "Loaded {name} ({n} frames, {secs:.1}s).{log} Pick Box or Paint to choose the area to freeze, then press Make loop."
         );
     }
 
@@ -916,6 +952,7 @@ impl StudioApp {
 
     /// Choose an aspect ratio; the crop box takes that shape at once.
     pub fn set_aspect(&mut self, aspect: crate::crop::Aspect) {
+        self.begin_crop();
         let Some(s) = &mut self.scene else { return };
         s.checkpoint();
         s.aspect = aspect;
@@ -1127,7 +1164,7 @@ impl StudioApp {
     // ----- Layout -------------------------------------------------------
 
     /// A file's scene and its edits (the current file's edits live in the app).
-    fn scene_and_edits(&self, id: u64) -> Option<(&Scene, crate::scene::Edits)> {
+    pub(crate) fn scene_and_edits(&self, id: u64) -> Option<(&Scene, crate::scene::Edits)> {
         if let Some(s) = self.scene.as_ref().filter(|s| s.id == id) {
             return Some((
                 s,
@@ -1398,6 +1435,10 @@ impl StudioApp {
 
     /// Redraw everything that shows the picture after a quarter turn.
     fn after_turn(&mut self, ctx: &egui::Context) {
+        if self.tool == Tool::Crop {
+            self.crop_entry = None;
+            self.begin_crop();
+        }
         let Some(scene) = &self.scene else { return };
         let thumb_img = crate::scene::downscale(&scene.work, 160);
         let color = egui::ColorImage::from_rgba_unmultiplied(
@@ -1486,7 +1527,7 @@ impl StudioApp {
                 (Source::Video { clip: v.clone(), settings }, frames, fps)
             }
             None => (
-                Source::Photo(Arc::new(s.full.clone())),
+                Source::Photo(s.full.clone()),
                 ((self.loop_seconds * self.fps as f32).round() as usize).max(4),
                 self.fps,
             ),
@@ -1590,28 +1631,29 @@ impl StudioApp {
         else {
             return;
         };
-        let photo = if self.export_size == 0 {
-            scene.full.clone()
-        } else {
-            crate::scene::downscale(&scene.full, self.export_size)
+        let Some((scene, edits)) = self.scene_and_edits(scene.id) else { return };
+        let job = crate::still_export::StillJob {
+            full: scene.full.clone(),
+            crop: scene.crop,
+            edits,
+            size: self.export_size,
+            format,
+            target: path,
         };
-        let (look, crop, border, caption) = (self.look, scene.crop, self.border, self.caption.clone());
         let progress = Arc::new(Progress::new());
         let (tx, rx) = channel();
-        let path2 = path.clone();
         std::thread::spawn(move || {
-            let mut img = photo;
-            crate::finish::apply_look(&mut img, &look);
-            let img = finish_frame(&img, crop, &caption_overlay(&caption, crop, &img, &border), border);
-            let result = crate::export::save_still(format, &img, &path2);
-            let _ = tx.send(TaskResult::Saved(result));
+            let _ = tx.send(TaskResult::Saved(job.run()));
         });
         self.task = Some(Task { progress, rx, kind: TaskKind::Export, label: "Saving image".into() });
     }
 
     pub fn start_export(&mut self) {
         if self.export_format.is_still() {
-            self.export_still();
+            match self.selected_photo_ids() {
+                Some(ids) => self.export_photos(ids),
+                None => self.export_still(),
+            }
             return;
         }
         let Some(idx) = self.active_clip else { return };
@@ -1636,10 +1678,14 @@ impl StudioApp {
         let clip = &self.clips[idx];
         let recipe = clip.recipe.clone();
         let fps = recipe.fps;
-        let export_size = self.export_size;
-        let fit = move |img: &RgbaImage| {
-            if export_size == 0 { img.clone() } else { crate::scene::downscale(img, export_size) }
+        let size = self.export_size;
+        let source_dims = match &recipe.source {
+            Source::Photo(full) => full.dimensions(),
+            Source::Video { clip, .. } => clip.frames[0].dimensions(),
         };
+        let natural = crate::export_size::natural_size(source_dims, recipe.crop, &self.border);
+        let long = size.source_long(source_dims, natural);
+        let fit = move |img: &RgbaImage| crate::scene::downscale(img, long);
         let preview_dims = clip.frames[0].dimensions();
         let preview_frames = clip.frames.clone();
         let crop = recipe.crop;
@@ -1683,12 +1729,12 @@ impl StudioApp {
                     }
                 }
             };
-            let frames = frames.map(|f| {
+            let frames = frames.map(|f: Vec<RgbaImage>| -> Vec<RgbaImage> {
                 let overlay = f.first().and_then(|x| caption_overlay(&caption, crop, x, &border));
                 if crop.is_full() && !border.enabled && overlay.is_none() {
-                    f
+                    f.into_iter().map(|x| size.exact(x, natural)).collect()
                 } else {
-                    f.iter().map(|x| finish_frame(x, crop, &overlay, border)).collect()
+                    f.iter().map(|x| size.exact(finish_frame(x, crop, &overlay, border), natural)).collect()
                 }
             });
             let result = match frames {
@@ -1742,6 +1788,7 @@ impl StudioApp {
                 self.status = format!("Saved {}", path.display());
                 self.last_export = Some(path);
             }
+            (TaskResult::Batch(outcome), _) => self.batch_finished(outcome),
             (TaskResult::Saved(Err(e)), _) => self.status = format!("Saving failed: {e}"),
             (TaskResult::Video(Ok(v), name), _) => self.set_video(ctx, name, v),
             (TaskResult::Photo(Ok(img), name), _) => {
@@ -1853,6 +1900,13 @@ impl StudioApp {
         if self.tool == Tool::Crop && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             self.finish_crop();
         }
+        // Esc belongs to an open dialog, menu or the eyedropper first.
+        let esc_free = self.picking.is_none()
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && !egui::Popup::is_any_open(ctx);
+        if self.tool == Tool::Crop && esc_free && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.cancel_crop();
+        }
         let (rot_left, rot_right) =
             ctx.input(|i| (i.key_pressed(egui::Key::OpenBracket), i.key_pressed(egui::Key::CloseBracket)));
         if (rot_left || rot_right) && self.task.is_none() {
@@ -1913,6 +1967,11 @@ impl StudioApp {
     pub fn pick_tool(&mut self, tool: Tool) {
         let was = self.tool;
         self.tool = tool;
+        if tool == Tool::Crop {
+            self.begin_crop();
+        } else {
+            self.crop_entry = None;
+        }
         let edits = !matches!(tool, Tool::Hand | Tool::Select);
         if edits {
             self.view = View::Edit;
@@ -1929,10 +1988,9 @@ impl StudioApp {
         }
     }
 
-    /// Confirm the crop: hide the cut-away part and go back to painting.
+    /// Confirm the crop: hide the cut-away part and leave the crop tool.
     pub fn finish_crop(&mut self) {
-        let next = if self.scene.as_ref().is_some_and(|s| s.is_video()) { Tool::Rect } else { Tool::Brush };
-        self.pick_tool(next);
+        self.pick_tool(Tool::Hand);
         if let Some(s) = &self.scene {
             self.status = if s.crop.is_full() {
                 "No crop: the whole picture is kept.".into()

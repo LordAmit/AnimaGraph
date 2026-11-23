@@ -126,15 +126,16 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                 }
             });
         }
-        // Above Remove all: how many files are picked for Apply.
+        // Above Remove all: how many files are picked for Apply and Export.
         if !app.selected_files.is_empty() {
             ui.horizontal(|ui| {
                 let n = app.selected_files.len();
                 ui.label(
-                    egui::RichText::new(format!("{n} selected for Apply"))
+                    egui::RichText::new(format!("{n} selected"))
                         .size(12.0)
                         .color(theme::ACCENT),
-                );
+                )
+                .on_hover_text("Apply copies to the selected files. Export saves the open photo and the selected photos.");
                 if ui.small_button("Clear").on_hover_text("Unselect (Esc)").clicked() {
                     app.selected_files.clear();
                 }
@@ -157,7 +158,7 @@ fn file_row(app: &StudioApp, ui: &mut egui::Ui, i: usize, active: bool) -> (bool
     }
     let resp = resp.on_hover_text(
         "Click to open. Cmd-click (Ctrl-click) to select several files, Shift-click for a range; \
-         Apply edits / Apply framing then copy only to the selected files.",
+         Apply edits / Apply framing then copy only to the selected files, and Export saves them with the open one.",
     );
     let hovered = resp.hovered();
     let painter = ui.painter();

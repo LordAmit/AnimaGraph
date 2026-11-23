@@ -8,6 +8,7 @@ use crate::app::StudioApp;
 use crate::export::Format;
 use crate::icons::{self, Icon};
 use crate::layout::{self, Template};
+use crate::slider::SliderDigits;
 use crate::theme;
 
 /// A file being dragged from the Files panel (its index there).
@@ -225,8 +226,7 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
             fn pct<'a>(v: &'a mut f32, max: f32, name: &str) -> egui::Slider<'a> {
                 egui::Slider::new(v, 0.0..=max)
                     .text(name.to_string())
-                    .custom_formatter(|v, _| format!("{:.1}%", v * 100.0))
-                    .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                    .percent()
             }
             ui.add(pct(&mut l.gap, 0.1, "Gap")).on_hover_text("Space between photos, in % of the shorter side");
             ui.add(pct(&mut l.margin, 0.15, "Margin")).on_hover_text("Space around the edge, in % of the shorter side");
@@ -252,7 +252,7 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                 let (iw, ih) = (img.width() as f32, img.height() as f32);
                 let min = layout::min_zoom(iw, ih, canvas_box[2], canvas_box[3]);
                 let cell = &mut l.cells[i];
-                ui.add(egui::Slider::new(&mut cell.zoom, min..=layout::ZOOM_MAX).text("Zoom").fixed_decimals(2))
+                ui.add(egui::Slider::new(&mut cell.zoom, min..=layout::ZOOM_MAX).text("Zoom").two_digits())
                     .on_hover_text("1 fills the box. Lower shows the whole photo with the background around it.");
                 layout::clamp_center(cell, iw, ih, canvas_box[2], canvas_box[3]);
                 ui.horizontal(|ui| {

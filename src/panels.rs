@@ -5,6 +5,7 @@ use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2}
 use crate::app::{StudioApp, Tool, View};
 use crate::export::Format;
 use crate::icons::{self, Icon};
+use crate::slider::SliderDigits;
 use crate::theme;
 use crate::app::defaults;
 
@@ -68,6 +69,7 @@ macro_rules! with_reset {
     ($ui:expr, $val:expr, $def:expr, $slider:expr) => {{
         let mut changed = false;
         $ui.horizontal(|ui| {
+            crate::slider::steady(ui);
             changed = ui.add($slider).changed();
             if reset_icon(ui, $val == $def) {
                 $val = $def;
@@ -603,8 +605,8 @@ fn region_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                     .size(12.0)
                     .color(theme::TEXT_DIM),
             );
-            with_reset!(ui, app.brush_radius, defaults::BRUSH_RADIUS, egui::Slider::new(&mut app.brush_radius, 3.0..=120.0).text("Brush size").integer());
-            with_reset!(ui, app.brush_hardness, defaults::BRUSH_HARDNESS, egui::Slider::new(&mut app.brush_hardness, 0.0..=1.0).text("Hardness"));
+            with_reset!(ui, app.brush_radius, defaults::BRUSH_RADIUS, egui::Slider::new(&mut app.brush_radius, 3.0..=120.0).text("Brush size").two_digits());
+            with_reset!(ui, app.brush_hardness, defaults::BRUSH_HARDNESS, egui::Slider::new(&mut app.brush_hardness, 0.0..=1.0).text("Hardness").two_digits());
             ui.horizontal_wrapped(|ui| {
                 if !is_video && ui
                     .add(icons::button(Icon::Sparkle, "Auto-detect sky & water", theme::ARROW))
@@ -671,7 +673,7 @@ fn motion_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                     .size(12.0)
                     .color(theme::TEXT_DIM),
             );
-            with_reset!(ui, app.speed, defaults::SPEED, egui::Slider::new(&mut app.speed, 0.1..=3.0).text("Speed").suffix("×"));
+            with_reset!(ui, app.speed, defaults::SPEED, egui::Slider::new(&mut app.speed, 0.1..=3.0).text("Speed").suffix("×").two_digits());
 
             // Arrow length.
             ui.horizontal(|ui| {
@@ -684,8 +686,7 @@ fn motion_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 defaults::ARROW_LEN,
                 egui::Slider::new(&mut app.arrow_len, 0.02..=0.5)
                     .text("Length")
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                    .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                    .percent()
             );
             if ui
                 .button("Make all arrows this length")
@@ -758,7 +759,7 @@ fn loop_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         if !is_open(app, "loop") {
             return;
         }
-        with_reset!(ui, app.loop_seconds, defaults::LOOP_SECONDS, egui::Slider::new(&mut app.loop_seconds, 1.0..=8.0).text("Length").suffix(" s").step_by(0.5));
+        with_reset!(ui, app.loop_seconds, defaults::LOOP_SECONDS, egui::Slider::new(&mut app.loop_seconds, 1.0..=8.0).text("Length").suffix(" s").two_digits());
         ui.horizontal(|ui| {
             ui.label("Frame rate");
             for fps in [12u32, 24, 30] {
@@ -1078,8 +1079,8 @@ pub fn video_card(app: &mut StudioApp, ui: &mut egui::Ui) {
 
         // Trim.
         ui.label(egui::RichText::new("Trim").strong());
-        let r1 = ui.add(egui::Slider::new(&mut start, 0..=n - 2).text("Start").custom_formatter(move |v, _| format!("{:.2}s", v as f32 / fps)));
-        let r2 = ui.add(egui::Slider::new(&mut end, 1..=n - 1).text("End").custom_formatter(move |v, _| format!("{:.2}s", v as f32 / fps)));
+        let r1 = ui.add(egui::Slider::new(&mut start, 0..=n - 2).text("Start").frame_seconds(fps));
+        let r2 = ui.add(egui::Slider::new(&mut end, 1..=n - 1).text("End").frame_seconds(fps));
         if r1.changed() || r2.changed() {
             if r1.changed() && start >= end {
                 end = (start + 1).min(n - 1);
@@ -1099,7 +1100,7 @@ pub fn video_card(app: &mut StudioApp, ui: &mut egui::Ui) {
 
         // Still frame.
         let r = ui
-            .add(egui::Slider::new(&mut still, 0..=n - 1).text("Frozen frame").custom_formatter(move |v, _| format!("{:.2}s", v as f32 / fps)))
+            .add(egui::Slider::new(&mut still, 0..=n - 1).text("Frozen frame").frame_seconds(fps))
             .on_hover_text("The single frame of the video that the still parts of the picture show");
         if r.changed() {
             let ctx = ui.ctx().clone();
@@ -1107,7 +1108,7 @@ pub fn video_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             app.view = View::Edit;
         }
 
-        with_reset!(ui, app.video_speed, defaults::VIDEO_SPEED, egui::Slider::new(&mut app.video_speed, 0.25..=2.0).text("Speed").suffix("×"));
+        with_reset!(ui, app.video_speed, defaults::VIDEO_SPEED, egui::Slider::new(&mut app.video_speed, 0.25..=2.0).text("Speed").suffix("×").two_digits());
         ui.checkbox(&mut app.stabilize, "Stabilize handheld clip")
             .on_hover_text("Aligns each frame to the frozen frame and zooms in slightly to hide the edges. Applied when the loop is made.");
 
@@ -1120,7 +1121,7 @@ pub fn video_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 ui,
                 app.crossfade_seconds,
                 defaults::CROSSFADE,
-                egui::Slider::new(&mut app.crossfade_seconds, 0.0..=max_fade.min(1.5)).text("Blend").suffix(" s")
+                egui::Slider::new(&mut app.crossfade_seconds, 0.0..=max_fade.min(1.5)).text("Blend").suffix(" s").two_digits()
             );
         });
         let used = end - start + 1;
@@ -1129,7 +1130,7 @@ pub fn video_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         let len = frames as f32 / (fps * app.video_speed);
         ui.label(egui::RichText::new(format!("Loop length {len:.1}s")).size(12.0).color(theme::TEXT_DIM));
         ui.separator();
-        with_reset!(ui, app.video_seconds, defaults::VIDEO_SECONDS, egui::Slider::new(&mut app.video_seconds, 1.0..=10.0).text("Read").suffix(" s").step_by(0.5));
+        with_reset!(ui, app.video_seconds, defaults::VIDEO_SECONDS, egui::Slider::new(&mut app.video_seconds, 1.0..=10.0).text("Read").suffix(" s").two_digits());
         ui.label(
             egui::RichText::new("Length read from the next video you open. Short clips (about 3 s) work best.")
                 .size(11.0)
@@ -1401,7 +1402,7 @@ fn tile_grid(app: &mut StudioApp, ui: &mut egui::Ui, tiles: &[Tile]) -> Option<T
 pub fn adjust_card(app: &mut StudioApp, ui: &mut egui::Ui) {
     edit_section(app, ui, "adj_light", "Light", &mut |app: &mut StudioApp, ui: &mut egui::Ui| {
         let l = &mut app.look;
-        with_reset!(ui, l.exposure, 0.0, egui::Slider::new(&mut l.exposure, -2.0..=2.0).text("Exposure").fixed_decimals(2));
+        with_reset!(ui, l.exposure, 0.0, egui::Slider::new(&mut l.exposure, -2.0..=2.0).text("Exposure").two_digits());
         with_reset!(ui, l.contrast, 0.0, pct(&mut l.contrast, -0.5, 0.5, "Contrast", 200.0));
         with_reset!(ui, l.highlights, 0.0, pct(&mut l.highlights, -1.0, 1.0, "Highlights", 100.0));
         with_reset!(ui, l.shadows, 0.0, pct(&mut l.shadows, -1.0, 1.0, "Shadows", 100.0));
@@ -1438,7 +1439,7 @@ pub fn adjust_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         sub_heading(ui, "Grain");
         with_reset!(ui, l.grain, 0.0, pct(&mut l.grain, 0.0, 1.0, "Amount", 100.0));
         ui.add_enabled_ui(l.grain > 0.0, |ui| {
-            with_reset!(ui, l.grain_size, DEFAULT_GRAIN_SIZE, egui::Slider::new(&mut l.grain_size, 1.0..=4.0).text("Size").fixed_decimals(1));
+            with_reset!(ui, l.grain_size, DEFAULT_GRAIN_SIZE, egui::Slider::new(&mut l.grain_size, 1.0..=4.0).text("Size").two_digits());
             with_reset!(ui, l.grain_rough, DEFAULT_GRAIN_ROUGH, pct(&mut l.grain_rough, 0.0, 1.0, "Roughness", 100.0));
         });
     });
@@ -1471,7 +1472,7 @@ pub fn adjust_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         );
         let l = &mut app.look;
         with_reset!(ui, l.s_curve, 0.0, pct(&mut l.s_curve, -1.0, 1.0, "S-curve", 100.0));
-        with_reset!(ui, l.pivot, crate::finish::DEFAULT_PIVOT, egui::Slider::new(&mut l.pivot, 0.1..=0.9).text("Pivot").fixed_decimals(2));
+        with_reset!(ui, l.pivot, crate::finish::DEFAULT_PIVOT, egui::Slider::new(&mut l.pivot, 0.1..=0.9).text("Pivot").two_digits());
     });
 
     edit_section(app, ui, "adj_hsl", "HSL / Color", &mut |app: &mut StudioApp, ui: &mut egui::Ui| {
@@ -1547,7 +1548,7 @@ pub fn adjust_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             ui.label(egui::RichText::new(RANGES[r]).size(12.0).color(theme::TEXT));
         });
         let g = &mut app.look.grade[r];
-        with_reset!(ui, g[0], 0.0, egui::Slider::new(&mut g[0], 0.0..=360.0).text("Hue").suffix("°").fixed_decimals(0));
+        with_reset!(ui, g[0], 0.0, egui::Slider::new(&mut g[0], 0.0..=360.0).text("Hue").suffix("°").two_digits());
         with_reset!(ui, g[1], 0.0, pct(&mut g[1], 0.0, 1.0, "Saturation", 100.0));
         with_reset!(ui, g[2], 0.0, pct(&mut g[2], -1.0, 1.0, "Luminance", 100.0));
         ui.add_space(4.0);
@@ -1654,12 +1655,11 @@ fn edit_section(
     });
 }
 
-/// A slider shown as whole numbers (value × `scale`), like -100..100.
+/// A slider shown as value × `scale`, like -100..100.
 pub(crate) fn pct<'a>(v: &'a mut f32, lo: f32, hi: f32, text: &str, scale: f64) -> egui::Slider<'a> {
     egui::Slider::new(v, lo..=hi)
         .text(text)
-        .custom_formatter(move |x, _| format!("{:.0}", x * scale))
-        .custom_parser(move |t| t.trim().parse::<f64>().ok().map(|x| x / scale))
+        .two_digits_of(scale)
 }
 
 /// Point tone-curve editor: drag points, click to add, right-click to remove.
@@ -1767,10 +1767,11 @@ fn straighten_row(app: &mut StudioApp, ui: &mut egui::Ui) {
     let mut deg = current;
     let ctx = ui.ctx().clone();
     ui.horizontal(|ui| {
+        crate::slider::steady(ui);
         let r = ui
             .add_enabled(
                 !app.busy(),
-                egui::Slider::new(&mut deg, -45.0..=45.0).text("Straighten").suffix("°").fixed_decimals(1).step_by(0.1),
+                egui::Slider::new(&mut deg, -45.0..=45.0).text("Straighten").suffix("°").two_digits(),
             )
             .on_hover_text(
                 "Turn the picture by any angle (right is clockwise). It is zoomed in slightly so no \
@@ -1923,8 +1924,7 @@ pub fn border_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 crate::border::DEFAULT_SIZE,
                 egui::Slider::new(&mut b.size, 0.0..=0.25)
                     .text("Thickness")
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                    .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                    .percent()
             );
             ui.horizontal(|ui| {
                 ui.label("Color");
@@ -1946,8 +1946,7 @@ pub fn border_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 0.0,
                 egui::Slider::new(&mut b.radius, 0.0..=0.25)
                     .text("Rounded")
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                    .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                    .percent()
             );
             ui.checkbox(&mut b.mounts, "Corner mounts")
                 .on_hover_text("Small paper triangles holding the photo at its corners, as in a photo album");
@@ -1958,8 +1957,7 @@ pub fn border_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                     crate::border::DEFAULT_MOUNT_SIZE,
                     egui::Slider::new(&mut b.mount_size, 0.03..=0.25)
                         .text("Mount size")
-                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                        .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                    .percent()
                 );
                 ui.horizontal(|ui| {
                     ui.label("Mount color");
@@ -2040,13 +2038,14 @@ fn polaroid_controls(app: &mut StudioApp, ui: &mut egui::Ui) {
 
     ui.label(egui::RichText::new("Polaroid bottom strip").size(12.0).color(theme::TEXT_DIM));
     ui.horizontal(|ui| {
+        crate::slider::steady(ui);
         let mut depth = shown;
         let r = ui
             .add(
                 egui::Slider::new(&mut depth, crate::border::POLAROID_BOTTOM_RANGE)
                     .text("Bottom")
-                    .custom_formatter(|v, _| format!("{v:.1}×"))
-                    .custom_parser(|t| t.trim_end_matches('×').trim().parse::<f64>().ok()),
+                    .suffix("×")
+                    .two_digits(),
             )
             .on_hover_text("How deep the bottom strip is, in times the top and side edges. Moving it lets go of the target ratio.");
         if r.changed() {
@@ -2152,8 +2151,7 @@ pub fn caption_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 crate::caption::DEFAULT_SIZE,
                 egui::Slider::new(&mut c.size, 0.02..=0.25)
                     .text("Size")
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                    .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                    .percent()
             );
             with_reset!(
                 ui,
@@ -2161,10 +2159,9 @@ pub fn caption_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                 crate::caption::DEFAULT_MARGIN,
                 egui::Slider::new(&mut c.margin, 0.0..=0.4)
                     .text("Margin")
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                    .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                    .percent()
             );
-            with_reset!(ui, c.opacity, 1.0, egui::Slider::new(&mut c.opacity, 0.1..=1.0).text("Opacity").fixed_decimals(2));
+            with_reset!(ui, c.opacity, 1.0, egui::Slider::new(&mut c.opacity, 0.1..=1.0).text("Opacity").two_digits());
             ui.horizontal(|ui| {
                 ui.label("Color");
                 color_swatches(ui, &mut c.color, &app.palette);
@@ -2481,8 +2478,7 @@ pub fn film_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             1.0,
             egui::Slider::new(&mut app.film_strength, 0.0..=1.0)
                 .text("Strength")
-                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                .custom_parser(|t| t.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0))
+                    .percent()
         );
         if r {
             if let Some(i) = app.film_choice {

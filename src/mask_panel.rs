@@ -8,6 +8,7 @@ use crate::app::{PickTarget, StudioApp};
 use crate::icons::{self, Icon};
 use crate::mask::{Mask, RangeKind, Shape};
 use crate::panels::{eyedropper_button, fold_title, is_open, pct, reset_icon};
+use crate::slider::SliderDigits;
 use crate::theme;
 
 pub fn masks_card(app: &mut StudioApp, ui: &mut egui::Ui) {
@@ -148,8 +149,8 @@ fn selected_mask(app: &mut StudioApp, ui: &mut egui::Ui) {
                     m.fill(0.0);
                 }
             });
-            ui.add(egui::Slider::new(&mut brush_size, 3.0..=200.0).text("Brush size").integer());
-            ui.add(egui::Slider::new(&mut hardness, 0.0..=1.0).text("Hardness"));
+            ui.add(egui::Slider::new(&mut brush_size, 3.0..=200.0).text("Brush size").two_digits());
+            ui.add(egui::Slider::new(&mut hardness, 0.0..=1.0).text("Hardness").two_digits());
         }
         Shape::Linear { .. } => {
             ui.label(egui::RichText::new("Drag on the picture to draw the gradient: full effect where you start, none where you let go. Drag the dots to adjust.").size(11.5).color(theme::TEXT_DIM));
@@ -180,12 +181,12 @@ fn selected_mask(app: &mut StudioApp, ui: &mut egui::Ui) {
         }
         RangeKind::Color => {
             ui.horizontal(|ui| {
-                ui.add(egui::Slider::new(&mut m.range.hue, 0.0..=360.0).text("Hue").suffix("°").integer());
+                ui.add(egui::Slider::new(&mut m.range.hue, 0.0..=360.0).text("Hue").suffix("°").two_digits());
                 if eyedropper_button(ui, picking).on_hover_text("Pick the colour from the picture").clicked() {
                     pick_clicked = true;
                 }
             });
-            ui.add(egui::Slider::new(&mut m.range.hue_width, 10.0..=180.0).text("Width").suffix("°").integer());
+            ui.add(egui::Slider::new(&mut m.range.hue_width, 10.0..=180.0).text("Width").suffix("°").two_digits());
             ui.add(pct(&mut m.range.smooth, 0.0, 1.0, "Smoothness", 100.0));
         }
     }
@@ -194,8 +195,9 @@ fn selected_mask(app: &mut StudioApp, ui: &mut egui::Ui) {
     ui.label(egui::RichText::new("Adjustments").strong());
     let l = &mut m.local;
     ui.horizontal(|ui| {
+        crate::slider::steady(ui);
         let was_zero = l.exposure == 0.0;
-        ui.add(egui::Slider::new(&mut l.exposure, -2.0..=2.0).text("Exposure").fixed_decimals(2));
+        ui.add(egui::Slider::new(&mut l.exposure, -2.0..=2.0).text("Exposure").two_digits());
         if reset_icon(ui, was_zero) {
             l.exposure = 0.0;
         }
@@ -203,6 +205,7 @@ fn selected_mask(app: &mut StudioApp, ui: &mut egui::Ui) {
     macro_rules! adj {
         ($field:ident, $lo:expr, $hi:expr, $name:expr, $scale:expr) => {{
             ui.horizontal(|ui| {
+                crate::slider::steady(ui);
                 let was_zero = l.$field == 0.0;
                 ui.add(pct(&mut l.$field, $lo, $hi, $name, $scale));
                 if reset_icon(ui, was_zero) {

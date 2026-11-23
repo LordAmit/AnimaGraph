@@ -56,6 +56,7 @@ mod sky;
 #[cfg(test)]
 mod sky_refs;
 mod stabilize;
+mod slider;
 mod still_export;
 mod straighten;
 mod theme;

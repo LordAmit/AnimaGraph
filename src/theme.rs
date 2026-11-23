@@ -64,7 +64,7 @@ pub fn apply(ctx: &egui::Context) {
 
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
         style.spacing.button_padding = egui::vec2(10.0, 6.0);
-        style.spacing.slider_width = 96.0;
+        style.spacing.slider_width = 84.0;
         style.spacing.interact_size.y = 26.0;
 
         use egui::{FontFamily::Proportional, FontId, TextStyle};

@@ -1117,7 +1117,7 @@ impl StudioApp {
             self.refresh_photo_texture(ctx);
         }
         self.refresh_thumbnail();
-        self.status = if angle == 0.0 { "Straighten off.".into() } else { format!("Straightened {angle:+.1}°.") };
+        self.status = if angle == 0.0 { "Straighten off.".into() } else { format!("Straightened {}{}°.", if angle > 0.0 { "+" } else { "" }, crate::slider::text(angle as f64)) };
     }
 
     /// The picture the canvas shows now, for the vectorscope: the playing

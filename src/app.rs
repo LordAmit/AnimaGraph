@@ -165,6 +165,10 @@ pub struct StudioApp {
     pub selected_files: std::collections::BTreeSet<usize>,
     /// Where the last Cmd/Ctrl-click was, for Shift-click ranges.
     pub select_anchor: Option<usize>,
+    /// The order files were picked in (see file_selection).
+    pub file_picks: crate::file_selection::Picks,
+    /// Scroll the Files panel to the shown file.
+    pub files_scroll: bool,
     /// Interface choices kept between sessions.
     pub prefs: crate::settings::Prefs,
     prefs_saved: crate::settings::Prefs,
@@ -358,6 +362,8 @@ impl StudioApp {
             files: Vec::new(),
             selected_files: std::collections::BTreeSet::new(),
             select_anchor: None,
+            file_picks: Default::default(),
+            files_scroll: false,
             active_file: None,
             prefs: crate::settings::Prefs::default(),
             prefs_saved: crate::settings::Prefs::default(),

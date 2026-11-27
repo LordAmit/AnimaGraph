@@ -36,6 +36,7 @@ mod develop;
 mod export;
 mod export_panel;
 mod export_size;
+mod file_selection;
 mod files_panel;
 mod film;
 mod finish;

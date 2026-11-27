@@ -40,6 +40,13 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
         return;
     }
 
+    if app.panel_visible("files") {
+        let ctx = ui.ctx().clone();
+        let typing = ctx.memory(|m| m.focused()).is_some_and(|id| egui::text_edit::TextEditState::load(&ctx, id).is_some());
+        if !typing {
+            app.file_keys(&ctx);
+        }
+    }
     let mut select = None;
     let mut remove = None;
     let mods = ui.input(|i| i.modifiers);
@@ -58,26 +65,17 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                 }
             }
         });
+    app.files_scroll = false;
 
     let ctx = ui.ctx().clone();
+    use crate::file_selection::Pick;
     if let Some(i) = remove {
         app.remove_file(&ctx, i);
     } else if let Some(i) = select {
         if mods.command {
-            // Cmd/Ctrl-click: add or take away one file from the selection.
-            if Some(i) != app.active_file && !app.selected_files.remove(&i) {
-                app.selected_files.insert(i);
-            }
-            app.select_anchor = Some(i);
+            app.pick_files(&ctx, Pick::Toggle(i));
         } else if mods.shift {
-            // Shift-click: select every file between the last pick and this one.
-            let from = app.select_anchor.or(app.active_file).unwrap_or(i);
-            let (a, b) = (from.min(i), from.max(i));
-            for k in a..=b {
-                if Some(k) != app.active_file {
-                    app.selected_files.insert(k);
-                }
-            }
+            app.pick_files(&ctx, Pick::Range(i));
         } else if app.layout_open {
             // In the layout: put the file in the selected box.
             match app.layout_cell {
@@ -87,13 +85,11 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                 }
             }
         } else {
-            app.selected_files.clear();
-            app.select_anchor = Some(i);
-            app.select_file(&ctx, i);
+            app.pick_files(&ctx, Pick::Click(i));
         }
     }
     if !app.selected_files.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        app.selected_files.clear();
+        app.pick_files(&ctx, Pick::Clear);
     }
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -129,15 +125,19 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
         // Above Remove all: how many files are picked for Apply and Export.
         if !app.selected_files.is_empty() {
             ui.horizontal(|ui| {
-                let n = app.selected_files.len();
+                let n = app.selected_files.len() + 1;
                 ui.label(
                     egui::RichText::new(format!("{n} selected"))
                         .size(12.0)
                         .color(theme::ACCENT),
                 )
-                .on_hover_text("Apply copies to the selected files. Export saves the open photo and the selected photos.");
-                if ui.small_button("Clear").on_hover_text("Unselect (Esc)").clicked() {
-                    app.selected_files.clear();
+                .on_hover_text(
+                    "The shown file is the one picked last. Apply copies its edits to the other selected files; \
+                     Export saves them all. Cmd/Ctrl+A picks every file, Shift+Up/Down grows or shrinks the range.",
+                );
+                if ui.small_button("Clear").on_hover_text("Keep only the shown file (Esc)").clicked() {
+                    let ctx = ui.ctx().clone();
+                    app.pick_files(&ctx, crate::file_selection::Pick::Clear);
                 }
             });
         }
@@ -148,17 +148,22 @@ pub fn files_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
 /// Returns (row clicked, remove clicked).
 fn file_row(app: &StudioApp, ui: &mut egui::Ui, i: usize, active: bool) -> (bool, bool) {
     let entry = &app.files[i];
-    let picked = app.selected_files.contains(&i);
+    // The shown file is part of a selection of several too.
+    let picked = app.selected_files.contains(&i) || (active && !app.selected_files.is_empty());
     let width = ui.available_width();
     // In the layout, files can also be dragged onto a box.
     let sense = if app.layout_open { Sense::click_and_drag() } else { Sense::click() };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 62.0), sense);
+    if active && app.files_scroll {
+        resp.scroll_to_me(None);
+    }
     if app.layout_open && resp.drag_started() {
         egui::DragAndDrop::set_payload(ui.ctx(), crate::layout_view::FileDrag(i));
     }
     let resp = resp.on_hover_text(
-        "Click to open. Cmd-click (Ctrl-click) to select several files, Shift-click for a range; \
-         Apply edits / Apply framing then copy only to the selected files, and Export saves them with the open one.",
+        "Click to open. Cmd-click (Ctrl-click) to select several files, Shift-click or Shift+Up/Down for a \
+         range, Cmd/Ctrl+A for all. The file picked last is shown; Apply copies its edits to the other \
+         selected files, and Export saves them all.",
     );
     let hovered = resp.hovered();
     let painter = ui.painter();

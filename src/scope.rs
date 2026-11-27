@@ -35,10 +35,33 @@ pub fn targets() -> [(&'static str, [f32; 2]); 6] {
     ]
 }
 
-/// Direction of the skin tone line (about 123° from the Cb axis).
+/// Angle of the skin tone line, from the Cb axis towards Cr.
+pub const SKIN_ANGLE: f32 = 123.0;
+/// How far, on each side of the line, natural skin tones usually fall.
+pub const SKIN_SPREAD: f32 = 12.0;
+
+/// Direction of the skin tone line.
 pub fn skin_direction() -> [f32; 2] {
-    let a = 123f32.to_radians();
+    let a = SKIN_ANGLE.to_radians();
     [a.cos(), a.sin()]
+}
+
+/// The skin tone band as directions (Cb, Cr) from one side to the other,
+/// for drawing a wedge from the centre.
+pub fn skin_band() -> Vec<[f32; 2]> {
+    (0..=12)
+        .map(|i| {
+            let a = (SKIN_ANGLE - SKIN_SPREAD + 2.0 * SKIN_SPREAD * i as f32 / 12.0).to_radians();
+            [a.cos(), a.sin()]
+        })
+        .collect()
+}
+
+#[cfg(test)]
+/// Is a Cb / Cr colour inside the skin tone band?
+pub fn in_skin_band(c: [f32; 2]) -> bool {
+    let a = c[1].atan2(c[0]).to_degrees();
+    (a - SKIN_ANGLE).abs() <= SKIN_SPREAD
 }
 
 /// The scope trace for a picture: each spot is coloured with the average
@@ -98,6 +121,25 @@ mod tests {
         assert!(x < mid && y < mid, "red should be up and to the left: {x} {y}");
         // Blue is to the right.
         assert!(to_scope(chroma(0.0, 0.0, 1.0), 1.0)[0] > mid);
+    }
+
+    #[test]
+    fn skin_tones_fall_in_the_band() {
+        let rgb = |r: u8, g: u8, b: u8| chroma(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+        // Light to dark skin.
+        for (r, g, b) in [(241, 194, 167), (232, 190, 172), (194, 140, 108), (160, 108, 78), (110, 70, 50), (74, 48, 36)] {
+            assert!(in_skin_band(rgb(r, g, b)), "{r} {g} {b}");
+        }
+        // Strong red and yellow, and blue, are not skin.
+        for (r, g, b) in [(255, 0, 0), (255, 255, 0), (40, 60, 200)] {
+            assert!(!in_skin_band(rgb(r, g, b)), "{r} {g} {b}");
+        }
+        // The drawn band is the same band, with the line in its middle.
+        let band = skin_band();
+        assert!(band.iter().all(|&d| in_skin_band([d[0] * 0.999, d[1] * 0.999])));
+        let mid = band[band.len() / 2];
+        let line = skin_direction();
+        assert!((mid[0] - line[0]).abs() < 1e-6 && (mid[1] - line[1]).abs() < 1e-6);
     }
 
     #[test]

@@ -34,24 +34,7 @@ pub fn write_video(frames: &[RgbaImage], fps: u32, target: &Path, mov: bool, rep
         let writer = AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type)
             .map_err(|e| format!("Could not create the video: {}", e.localizedDescription()))?;
 
-        let num = |v: f64| NSNumber::new_f64(v);
-        let bitrate = ((w * h) as f64 * fps as f64 * 0.2).max(2_000_000.0);
-        let bitrate_n = num(bitrate);
-        let compression = NSDictionary::<NSString, AnyObject>::from_slices(
-            &[AVVideoAverageBitRateKey.ok_or("missing key")?],
-            &[bitrate_n.as_ref()],
-        );
-        let (wn, hn) = (num(w as f64), num(h as f64));
-        let codec: &AnyObject = AVVideoCodecTypeH264.ok_or("H.264 is not available.")?.as_ref();
-        let settings = NSDictionary::<NSString, AnyObject>::from_slices(
-            &[
-                AVVideoCodecKey.ok_or("missing key")?,
-                AVVideoWidthKey.ok_or("missing key")?,
-                AVVideoHeightKey.ok_or("missing key")?,
-                AVVideoCompressionPropertiesKey.ok_or("missing key")?,
-            ],
-            &[codec, wn.as_ref(), hn.as_ref(), compression.as_ref()],
-        );
+        let settings = h264_settings(w, h, fps as f64)?;
         let media = AVMediaTypeVideo.ok_or("Video support is not available.")?;
         let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(media, Some(&settings));
         input.setExpectsMediaDataInRealTime(false);
@@ -98,6 +81,30 @@ pub fn write_video(frames: &[RgbaImage], fps: u32, target: &Path, mov: bool, rep
     Ok(())
 }
 
+/// Writer settings for H.264 at `w` x `h`, with a bit rate for the size.
+pub(crate) fn h264_settings(w: usize, h: usize, fps: f64) -> Result<objc2::rc::Retained<NSDictionary<NSString, AnyObject>>, String> {
+    unsafe {
+        let num = |v: f64| NSNumber::new_f64(v);
+        let bitrate = ((w * h) as f64 * fps * 0.2).max(2_000_000.0);
+        let bitrate_n = num(bitrate);
+        let compression = NSDictionary::<NSString, AnyObject>::from_slices(
+            &[AVVideoAverageBitRateKey.ok_or("missing key")?],
+            &[bitrate_n.as_ref()],
+        );
+        let (wn, hn) = (num(w as f64), num(h as f64));
+        let codec: &AnyObject = AVVideoCodecTypeH264.ok_or("H.264 is not available.")?.as_ref();
+        Ok(NSDictionary::<NSString, AnyObject>::from_slices(
+            &[
+                AVVideoCodecKey.ok_or("missing key")?,
+                AVVideoWidthKey.ok_or("missing key")?,
+                AVVideoHeightKey.ok_or("missing key")?,
+                AVVideoCompressionPropertiesKey.ok_or("missing key")?,
+            ],
+            &[codec, wn.as_ref(), hn.as_ref(), compression.as_ref()],
+        ))
+    }
+}
+
 unsafe fn failure(writer: &AVAssetWriter) -> String {
     unsafe {
         writer
@@ -108,7 +115,7 @@ unsafe fn failure(writer: &AVAssetWriter) -> String {
 }
 
 /// A BGRA pixel buffer holding the top-left `w` x `h` of `img`.
-unsafe fn make_buffer(img: &RgbaImage, w: usize, h: usize) -> Result<CFRetained<CVPixelBuffer>, String> {
+pub(crate) unsafe fn make_buffer(img: &RgbaImage, w: usize, h: usize) -> Result<CFRetained<CVPixelBuffer>, String> {
     unsafe {
         let mut raw: *mut CVPixelBuffer = std::ptr::null_mut();
         let rc = CVPixelBufferCreate(None, w, h, kCVPixelFormatType_32BGRA, None, NonNull::from(&mut raw));

@@ -47,7 +47,12 @@ pub fn size_picker(app: &mut StudioApp, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new(text).size(12.0).color(theme::TEXT_DIM));
     };
     if let Some(sc) = &app.scene {
-        let natural = natural_size(sc.full.dimensions(), sc.crop, &app.border);
+        // The whole video is saved from the file, at its own size.
+        let source = match app.video_origin() {
+            Some(o) if app.export_format.is_video() && app.video_whole => o.size,
+            _ => sc.full.dimensions(),
+        };
+        let natural = natural_size(source, sc.crop, &app.border);
         let (w, h) = app.export_size.output(natural);
         note(ui, format!("Saves {w} × {h} px, crop and border included"));
         if app.export_size.too_big(natural) {
@@ -74,6 +79,9 @@ pub fn save_all(app: &mut StudioApp, ui: &mut egui::Ui) {
         return;
     }
     let n = app.photo_ids().len();
+    if n == 0 {
+        return;
+    }
     let still = app.export_format.is_still();
     let button = egui::Button::new(format!("Save all {n} photos…"));
     if ui
@@ -115,4 +123,37 @@ pub fn export_hint(app: &StudioApp, several: Option<usize>) -> String {
         ),
         None => format!("{format}, {size}: the format and size chosen in the Export drawer"),
     }
+}
+
+/// For a video file: save the whole edited video, or the selected loop.
+pub fn video_choice(app: &mut StudioApp, ui: &mut egui::Ui) {
+    let is_video = app.scene.as_ref().is_some_and(|s| s.is_video());
+    if !is_video {
+        return;
+    }
+    if app.video_origin().is_none() {
+        if app.export_format.is_video() {
+            note(ui, "Only loops can be saved from GIFs and photo sequences.");
+        }
+        return;
+    }
+    if !app.export_format.is_video() {
+        note(ui, "To save the whole video with your edits, choose MP4 or MOV video.");
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Save");
+        ui.selectable_value(&mut app.video_whole, true, "Edited video").on_hover_text(
+            "The whole video, every frame with your edits (Edit, crop, straighten, border, caption), \
+             at the size below and with its sound. No loop is made.",
+        );
+        ui.selectable_value(&mut app.video_whole, false, "Loop").on_hover_text("The loop selected in Results");
+    });
+    if app.video_whole {
+        note(ui, "Whole length: Trim and Speed apply to loops only.");
+    }
+}
+
+fn note(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(12.0).color(theme::TEXT_DIM));
 }

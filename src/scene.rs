@@ -43,6 +43,7 @@ fn turn_video(v: &crate::video::VideoSource, turn: &dyn Fn(&RgbaImage) -> RgbaIm
         apple_log: v.apple_log,
         log_frames: v.log_frames.as_ref().map(|l| std::sync::Arc::new(l.iter().map(turn).collect())),
         log_converted: v.log_converted,
+        origin: v.origin.clone(),
     }
 }
 
@@ -63,6 +64,7 @@ fn straighten_video(v: &crate::video::VideoSource, degrees: f32) -> crate::video
         apple_log: v.apple_log,
         log_frames: v.log_frames.as_ref().map(|l| std::sync::Arc::new(l.iter().map(|f| rotate_fill(f, degrees)).collect())),
         log_converted: v.log_converted,
+        origin: v.origin.clone(),
     }
 }
 
@@ -107,6 +109,8 @@ pub struct Scene {
     pub trim: [usize; 2],
     /// Straighten angle in degrees (positive = clockwise), -45 to 45.
     pub angle: f32,
+    /// Quarter turns to the right since the file was opened (0 to 3).
+    pub quarter_turns: u8,
     /// The full-size picture (and video frames) still show an older angle;
     /// only `work` is up to date (while the angle slider is dragged).
     pub full_outdated: bool,
@@ -134,6 +138,7 @@ impl Scene {
             mask_version: 1,
             video: None,
             still_index: 0,
+            quarter_turns: 0,
             trim: [0, 0],
             angle: 0.0,
             full_outdated: false,
@@ -307,6 +312,7 @@ impl Scene {
         }
         self.mask = mask;
         self.full = std::sync::Arc::new(turn(&self.full));
+        self.quarter_turns = (self.quarter_turns + if clockwise { 1 } else { 3 }) % 4;
         self.edits.masks = self.edits.masks.iter().map(|m| m.turned(clockwise)).collect();
         self.work = turn(&self.work);
         // The picture before straightening turns too (turns and the angle

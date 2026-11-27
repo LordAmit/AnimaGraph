@@ -407,7 +407,7 @@ pub fn side_panel(app: &mut StudioApp, ui: &mut egui::Ui) {
                 "drawer_export",
                 Icon::Download,
                 "Export",
-                "Save the selected loop, or a still image.",
+                "Save a still image, a whole edited video, or a loop.",
                 |app, ui| export_card(app, ui),
             );
         }
@@ -463,10 +463,24 @@ fn vectorscope_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         let faint = Stroke::new(1.0, Color32::from_white_alpha(22));
         painter.line_segment([center - Vec2::new(radius, 0.0), center + Vec2::new(radius, 0.0)], faint);
         painter.line_segment([center - Vec2::new(0.0, radius), center + Vec2::new(0.0, radius)], faint);
-        let [sx, sy] = crate::scope::skin_direction();
-        painter.line_segment(
-            [center, center + Vec2::new(sx, -sy) * radius],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(230, 170, 130, 110)),
+        // Skin tone line, with the band where natural skin tones fall.
+        let skin = |a: f32| Color32::from_rgba_unmultiplied(230, 170, 130, (a * 255.0) as u8);
+        let towards = |d: [f32; 2]| Vec2::new(d[0], -d[1]);
+        let band = crate::scope::skin_band();
+        let mut wedge = vec![center];
+        wedge.extend(band.iter().map(|&d| center + towards(d) * radius));
+        painter.add(egui::Shape::convex_polygon(wedge, skin(0.10), Stroke::NONE));
+        for edge in [band[0], band[band.len() - 1]] {
+            painter.line_segment([center, center + towards(edge) * radius], Stroke::new(1.0, skin(0.16)));
+        }
+        let line = towards(crate::scope::skin_direction());
+        painter.line_segment([center, center + line * radius], Stroke::new(1.2, skin(0.55)));
+        painter.text(
+            center + line * (radius * 0.86) + line.rot90() * 9.0,
+            egui::Align2::CENTER_CENTER,
+            "Skin",
+            egui::FontId::proportional(9.5),
+            skin(0.7),
         );
         // Trace.
         if let Some(t) = &app.scope_tex {
@@ -492,7 +506,7 @@ fn vectorscope_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         resp.on_hover_text(
             "Each dot is a colour in the picture: the angle is the hue, the distance from the centre \
              the saturation. Boxes mark strong red, magenta, blue, cyan, green and yellow; the orange \
-             line is where skin tones fall. Grey and white sit in the middle.",
+             skin line, with its shaded band, is where natural skin tones fall. Grey and white sit in the middle.",
         );
     });
 }
@@ -844,7 +858,9 @@ fn export_card(app: &mut StudioApp, ui: &mut egui::Ui) {
                     ui.selectable_value(&mut app.export_format, Format::PngFrames, Format::PngFrames.label());
                 });
         });
-        if app.export_format.is_video() {
+        // Plays: how often a saved loop repeats (not for the whole video).
+        let whole = app.export_format.is_video() && app.video_whole && app.video_origin().is_some();
+        if app.export_format.is_video() && !whole {
             with_reset!(ui, app.video_repeats, defaults::REPEATS, egui::Slider::new(&mut app.video_repeats, 1..=10).text("Plays").suffix("×"));
             if let Some(c) = app.active_clip.and_then(|i| app.clips.get(i)) {
                 ui.label(
@@ -863,6 +879,7 @@ fn export_card(app: &mut StudioApp, ui: &mut egui::Ui) {
             };
             ui.label(egui::RichText::new(text).size(12.0).color(theme::TEXT_DIM));
         }
+        crate::export_panel::video_choice(app, ui);
         crate::export_panel::size_picker(app, ui);
         let can = app.can_export();
         let still = app.export_format.is_still();
@@ -870,6 +887,7 @@ fn export_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         let words = match several {
             Some(n) => format!("Save {}…", crate::batch_export::photos(n)),
             None if still => "Save image…".into(),
+            None if app.export_format.is_video() && app.video_whole && app.video_origin().is_some() => "Save edited video…".into(),
             None => "Save selected loop…".into(),
         };
         ui.horizontal(|ui| {
@@ -889,6 +907,9 @@ fn export_card(app: &mut StudioApp, ui: &mut egui::Ui) {
         });
         if still {
             crate::export_panel::save_all(app, ui);
+        }
+        if app.task.as_ref().is_some_and(|t| matches!(t.kind, crate::app::TaskKind::Export)) {
+            progress_row(app, ui);
         }
     });
 }

@@ -129,6 +129,8 @@ pub enum TaskKind {
 pub enum TaskResult {
     Frames(Option<Vec<RgbaImage>>),
     Saved(Result<PathBuf, String>),
+    /// A whole video saved, with a note when the sound was left out.
+    VideoSaved(Result<(PathBuf, Option<String>), String>),
     Batch(crate::batch_export::Outcome),
     Video(Result<VideoSource, String>, String),
     /// A developed RAW photo.
@@ -335,6 +337,9 @@ pub struct StudioApp {
     pub ffmpeg: bool,
     /// How many times a saved video plays the loop.
     pub video_repeats: u32,
+    /// For a video file, MP4 / MOV saves the whole edited video (true) or
+    /// the selected loop (false).
+    pub video_whole: bool,
     pub last_export: Option<PathBuf>,
     pub status: String,
 
@@ -465,6 +470,7 @@ impl StudioApp {
             crop_entry: None,
             ffmpeg: crate::export::video_available(),
             video_repeats: 3,
+            video_whole: true,
             last_export: None,
             status: "Open a photo, or try the sample scene.".into(),
             screenshot,
@@ -907,7 +913,7 @@ impl StudioApp {
         self.set_scene(ctx, Scene::from_video(name.clone(), video));
         self.pick_tool(Tool::Hand);
         self.status = format!(
-            "Loaded {name} ({n} frames, {secs:.1}s).{log} Pick Box or Paint to choose the area to freeze, then press Make loop."
+            "Loaded {name} ({n} frames, {secs:.1}s).{log} Edit it and export it as an MP4 or MOV video, or pick Box or Paint to choose the area to freeze and press Make loop."
         );
     }
 
@@ -1611,6 +1617,8 @@ impl StudioApp {
         }
         if self.export_format.is_still() {
             self.scene.is_some()
+        } else if self.saves_whole_video() {
+            true
         } else {
             self.active_clip.is_some()
         }
@@ -1654,6 +1662,10 @@ impl StudioApp {
                 Some(ids) => self.export_photos(ids),
                 None => self.export_still(),
             }
+            return;
+        }
+        if self.saves_whole_video() {
+            self.export_whole_video();
             return;
         }
         let Some(idx) = self.active_clip else { return };
@@ -1784,6 +1796,7 @@ impl StudioApp {
                 self.status = format!("Loop {number} is ready. Export it, or adjust and animate again.");
             }
             (TaskResult::Frames(None), _) => self.status = "Animation canceled.".into(),
+            (TaskResult::VideoSaved(r), _) => self.video_saved(r),
             (TaskResult::Saved(Ok(path)), TaskKind::Export) => {
                 self.status = format!("Saved {}", path.display());
                 self.last_export = Some(path);

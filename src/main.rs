@@ -22,6 +22,8 @@ mod layout_view;
 mod lr_match;
 #[cfg(target_os = "macos")]
 mod macvideo;
+#[cfg(target_os = "macos")]
+mod macvideo_stream;
 mod mcp_access;
 mod mcp_live;
 mod mcp_masks;
@@ -61,6 +63,7 @@ mod still_export;
 mod straighten;
 mod theme;
 mod video;
+mod video_export;
 
 use eframe::egui;
 

@@ -28,6 +28,15 @@ pub struct VideoSource {
     pub log_frames: Option<std::sync::Arc<Vec<RgbaImage>>>,
     /// The frames in use are converted from Apple Log to normal colours.
     pub log_converted: bool,
+    /// The file the frames were read from, when the whole video can be read again.
+    pub origin: Option<Origin>,
+}
+
+/// A video file and its picture size, upright.
+#[derive(Clone, Debug)]
+pub struct Origin {
+    pub path: PathBuf,
+    pub size: (u32, u32),
 }
 
 impl VideoSource {
@@ -51,7 +60,7 @@ impl VideoSource {
             .iter()
             .map(|f| crate::scene::downscale(f, crate::scene::WORK_SIZE))
             .collect();
-        Ok(Self { frames, work, fps: fps.clamp(1.0, 60.0), apple_log: false, log_frames: None, log_converted: false })
+        Ok(Self { frames, work, fps: fps.clamp(1.0, 60.0), apple_log: false, log_frames: None, log_converted: false, origin: None })
     }
 
     /// For an Apple Log clip as read, keep the log frames and use them
@@ -61,13 +70,13 @@ impl VideoSource {
             return self;
         }
         let log = std::sync::Arc::new(std::mem::take(&mut self.frames));
-        Self::from_log(log, self.fps, convert)
+        Self { origin: self.origin.take(), ..Self::from_log(log, self.fps, convert) }
     }
 
     /// The same Apple Log clip with the conversion switched on or off.
     pub fn log_switched(&self, convert: bool) -> Option<Self> {
         let log = self.log_frames.clone()?;
-        Some(Self::from_log(log, self.fps, convert))
+        Some(Self { origin: self.origin.clone(), ..Self::from_log(log, self.fps, convert) })
     }
 
     fn from_log(log: std::sync::Arc<Vec<RgbaImage>>, fps: f32, convert: bool) -> Self {
@@ -92,7 +101,7 @@ impl VideoSource {
             handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         });
         let work = frames.iter().map(|f| crate::scene::downscale(f, crate::scene::WORK_SIZE)).collect();
-        Self { frames, work, fps, apple_log: true, log_frames: Some(log), log_converted: convert }
+        Self { frames, work, fps, apple_log: true, log_frames: Some(log), log_converted: convert, origin: None }
     }
 
     pub fn seconds(&self) -> f32 {

@@ -19,7 +19,7 @@ use crate::video::{MAX_FRAMES, MAX_SIDE, VideoSource};
 
 /// How the phone held the camera, from the track's transform.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Turn {
+pub(crate) enum Turn {
     None,
     Right,
     Half,
@@ -36,16 +36,7 @@ pub fn decode(path: &Path, seconds: f32, fps: u32) -> Result<VideoSource, String
         let tracks = asset.tracksWithMediaType(media_type);
         let track = tracks.firstObject().ok_or("This file has no video track.")?;
 
-        let t = track.preferredTransform();
-        let turn = if t.a.abs() < 0.5 && t.b > 0.5 {
-            Turn::Right
-        } else if t.a.abs() < 0.5 && t.b < -0.5 {
-            Turn::Left
-        } else if t.a < -0.5 && t.d < -0.5 {
-            Turn::Half
-        } else {
-            Turn::None
-        };
+        let turn = Turn::of(&track);
         let native_fps = track.nominalFrameRate();
         let fps = if native_fps > 1.0 { (fps as f32).min(native_fps) } else { fps as f32 };
 
@@ -56,12 +47,7 @@ pub fn decode(path: &Path, seconds: f32, fps: u32) -> Result<VideoSource, String
             duration: CMTime::with_seconds(seconds as f64, 600),
         });
 
-        // Ask for plain 8-bit BGRA pixels.
-        let key_cf: &CFString = kCVPixelBufferPixelFormatTypeKey;
-        let key: &NSString = &*(key_cf as *const CFString as *const NSString);
-        let value = NSNumber::new_u32(kCVPixelFormatType_32BGRA);
-        let value_obj: &AnyObject = value.as_ref();
-        let settings = NSDictionary::<NSString, AnyObject>::from_slices(&[key], &[value_obj]);
+        let settings = bgra_settings();
 
         let output = AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(&track, Some(&settings));
         output.setAlwaysCopiesSampleData(false);
@@ -78,6 +64,7 @@ pub fn decode(path: &Path, seconds: f32, fps: u32) -> Result<VideoSource, String
         let mut next_time = 0.0f64;
         let mut first_pts: Option<f64> = None;
         let mut frames = Vec::new();
+        let mut native = None;
         // Apple Log clips (iPhone "Log" video) are marked; whether they are
         // converted to normal colours is chosen afterwards (VideoSource::with_log_choice).
         let mut apple_log: Option<bool> = None;
@@ -95,39 +82,11 @@ pub fn decode(path: &Path, seconds: f32, fps: u32) -> Result<VideoSource, String
             while next_time <= rel {
                 next_time += step;
             }
-            let Some(buffer) = sample.image_buffer() else { continue };
-            if CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly) != 0 {
-                continue;
-            }
-            let w = CVPixelBufferGetWidth(&buffer);
-            let h = CVPixelBufferGetHeight(&buffer);
-            let stride = CVPixelBufferGetBytesPerRow(&buffer);
-            let base = CVPixelBufferGetBaseAddress(&buffer) as *const u8;
-            let frame = if base.is_null() || w == 0 || h == 0 {
-                None
-            } else {
-                let data = std::slice::from_raw_parts(base, stride * h);
-                let mut img = RgbaImage::new(w as u32, h as u32);
-                for (y, row) in img.as_mut().chunks_exact_mut(w * 4).enumerate() {
-                    let src = &data[y * stride..y * stride + w * 4];
-                    for (d, s) in row.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                        d[0] = s[2];
-                        d[1] = s[1];
-                        d[2] = s[0];
-                        d[3] = 255;
-                    }
+            if let Some(img) = frame_of(&sample, turn) {
+                if native.is_none() {
+                    native = Some(img.dimensions());
                 }
-                Some(img)
-            };
-            CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly);
-            if let Some(img) = frame {
-                let img = crate::scene::downscale(&img, MAX_SIDE);
-                frames.push(match turn {
-                    Turn::None => img,
-                    Turn::Right => image::imageops::rotate90(&img),
-                    Turn::Half => image::imageops::rotate180(&img),
-                    Turn::Left => image::imageops::rotate270(&img),
-                });
+                frames.push(crate::scene::downscale(&img, MAX_SIDE));
             }
             if frames.len() >= MAX_FRAMES {
                 break;
@@ -142,7 +101,76 @@ pub fn decode(path: &Path, seconds: f32, fps: u32) -> Result<VideoSource, String
         }
         let mut v = VideoSource::new(frames, fps)?;
         v.apple_log = apple_log == Some(true);
+        v.origin = Some(crate::video::Origin { path: path.to_path_buf(), size: native.unwrap_or(v.frames[0].dimensions()) });
         Ok(v)
+    }
+}
+
+impl Turn {
+    /// From the track's transform.
+    pub(crate) unsafe fn of(track: &objc2_av_foundation::AVAssetTrack) -> Self {
+        let t = unsafe { track.preferredTransform() };
+        if t.a.abs() < 0.5 && t.b > 0.5 {
+            Turn::Right
+        } else if t.a.abs() < 0.5 && t.b < -0.5 {
+            Turn::Left
+        } else if t.a < -0.5 && t.d < -0.5 {
+            Turn::Half
+        } else {
+            Turn::None
+        }
+    }
+
+    fn apply(self, img: RgbaImage) -> RgbaImage {
+        match self {
+            Turn::None => img,
+            Turn::Right => image::imageops::rotate90(&img),
+            Turn::Half => image::imageops::rotate180(&img),
+            Turn::Left => image::imageops::rotate270(&img),
+        }
+    }
+}
+
+/// Settings asking for plain 8-bit BGRA pixels.
+pub(crate) fn bgra_settings() -> objc2::rc::Retained<NSDictionary<NSString, AnyObject>> {
+    unsafe {
+        let key_cf: &CFString = kCVPixelBufferPixelFormatTypeKey;
+        let key: &NSString = &*(key_cf as *const CFString as *const NSString);
+        let value = NSNumber::new_u32(kCVPixelFormatType_32BGRA);
+        let value_obj: &AnyObject = value.as_ref();
+        NSDictionary::<NSString, AnyObject>::from_slices(&[key], &[value_obj])
+    }
+}
+
+/// The picture of one BGRA video sample, upright, at full size.
+pub(crate) unsafe fn frame_of(sample: &objc2_core_media::CMSampleBuffer, turn: Turn) -> Option<RgbaImage> {
+    unsafe {
+        let buffer = sample.image_buffer()?;
+        if CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly) != 0 {
+            return None;
+        }
+        let w = CVPixelBufferGetWidth(&buffer);
+        let h = CVPixelBufferGetHeight(&buffer);
+        let stride = CVPixelBufferGetBytesPerRow(&buffer);
+        let base = CVPixelBufferGetBaseAddress(&buffer) as *const u8;
+        let frame = if base.is_null() || w == 0 || h == 0 {
+            None
+        } else {
+            let data = std::slice::from_raw_parts(base, stride * h);
+            let mut img = RgbaImage::new(w as u32, h as u32);
+            for (y, row) in img.as_mut().chunks_exact_mut(w * 4).enumerate() {
+                let src = &data[y * stride..y * stride + w * 4];
+                for (d, s) in row.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                    d[0] = s[2];
+                    d[1] = s[1];
+                    d[2] = s[0];
+                    d[3] = 255;
+                }
+            }
+            Some(img)
+        };
+        CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly);
+        frame.map(|f| turn.apply(f))
     }
 }
 
